@@ -14,6 +14,10 @@ import { createAuditRouter } from './routes/audit.js';
 import { createDashboardRouter } from './routes/dashboard.js';
 import { createExposureRouter } from './routes/exposure.js';
 import { createCompareRouter } from './routes/compare.js';
+import { createAdminRouter } from './routes/admin.js';
+import { createUserService } from './services/users.js';
+import { createAlertService } from './services/alerts.js';
+import { createScheduleService } from './services/schedule.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -39,12 +43,15 @@ const seedResult = seedDevelopmentAdmin(db, {
 });
 
 const audit = createAuditService(db);
+const users = createUserService(db);
+const alerts = createAlertService(db);
+const schedule = createScheduleService(db, { alerts });
 const orthanc = createOrthancService({
   url: process.env.ORTHANC_URL || 'http://localhost:8042',
   username: process.env.ORTHANC_USERNAME,
   password: process.env.ORTHANC_PASSWORD,
 });
-const requireAuth = createAuthMiddleware(JWT_SECRET);
+const requireAuth = createAuthMiddleware(JWT_SECRET, { getAuthState: users.getAuthState });
 const requireAdministrator = createRoleMiddleware('administrator');
 
 const app = express();
@@ -52,8 +59,9 @@ app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(express.json({ limit: '32kb' }));
 
 app.use('/api/health', createHealthRouter({ orthanc }));
-app.use('/api/auth', createAuthRouter({ db, audit, jwtSecret: JWT_SECRET, jwtExpiresIn: JWT_EXPIRES_IN, requireAuth }));
+app.use('/api/auth', createAuthRouter({ db, audit, alerts, users, jwtSecret: JWT_SECRET, jwtExpiresIn: JWT_EXPIRES_IN, requireAuth }));
 app.use('/api/audit', requireAuth, requireAdministrator, createAuditRouter({ audit }));
+app.use('/api/admin', requireAuth, requireAdministrator, createAdminRouter({ db, audit, users, schedule, alerts, orthanc }));
 app.use('/api/dashboard', requireAuth, createDashboardRouter({ orthanc, audit }));
 app.use('/api/exposure', requireAuth, createExposureRouter({ orthanc, audit }));
 app.use('/api/compare', requireAuth, createCompareRouter({ orthanc, audit }));

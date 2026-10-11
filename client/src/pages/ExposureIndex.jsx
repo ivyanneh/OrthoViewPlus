@@ -1,12 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import api from '../api/client.js';
+import EmptyState from '../components/EmptyState.jsx';
 import ErrorMessage from '../components/ErrorMessage.jsx';
 import LoadingState from '../components/LoadingState.jsx';
+import StatusBadge from '../components/StatusBadge.jsx';
+import { SearchIcon } from '../components/Icons.jsx';
 import { formatDicomDate, formatValue } from '../utils/format.js';
+
+function IndexHeader({ abbr, label }) {
+  return (
+    <th className="num" title={label}>
+      <span className="th-abbr">{abbr}</span>
+      <span className="th-sub">{label}</span>
+    </th>
+  );
+}
 
 function ExposureTable({ rows }) {
   return (
-    <div className="table-wrap">
+    <div className="table-wrap flush">
       <table className="data-table">
         <thead>
           <tr>
@@ -16,23 +28,25 @@ function ExposureTable({ rows }) {
             <th>Study Description</th>
             <th>Series Description</th>
             <th>Modality</th>
-            <th>Exposure Index</th>
-            <th>Target Exposure Index</th>
-            <th>Deviation Index</th>
+            <IndexHeader abbr="EI" label="Exposure Index" />
+            <IndexHeader abbr="EIT" label="Target Exposure Index" />
+            <IndexHeader abbr="DI" label="Deviation Index" />
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.id}>
-              <td>{formatDicomDate(row.studyDate)}</td>
-              <td>{formatValue(row.patientId)}</td>
-              <td>{formatValue(row.studyId)}</td>
+              <td className="mono nowrap">{formatDicomDate(row.studyDate)}</td>
+              <td className="mono">{formatValue(row.patientId)}</td>
+              <td className="mono">{formatValue(row.studyId)}</td>
               <td>{formatValue(row.studyDescription)}</td>
               <td>{formatValue(row.seriesDescription)}</td>
-              <td>{formatValue(row.modality)}</td>
-              <td>{formatValue(row.exposureIndex)}</td>
-              <td>{formatValue(row.targetExposureIndex)}</td>
-              <td>{formatValue(row.deviationIndex)}</td>
+              <td>
+                <span className="modality-tag">{formatValue(row.modality)}</span>
+              </td>
+              <td className="num mono">{formatValue(row.exposureIndex)}</td>
+              <td className="num mono">{formatValue(row.targetExposureIndex)}</td>
+              <td className="num mono strong">{formatValue(row.deviationIndex)}</td>
             </tr>
           ))}
         </tbody>
@@ -102,60 +116,90 @@ export default function ExposureIndex() {
   }, [data.rows, modality, search]);
 
   const connected = Boolean(data.orthanc?.connected);
+  const totalRows = (data.rows || []).length;
+  const filtersActive = search.trim() !== '' || modality !== 'all';
 
   return (
-    <section>
-      <header className="page-header">
-        <h2>Exposure Index</h2>
-        <p>Review exposure-related workflow metadata from Orthanc. Missing values remain marked as unavailable.</p>
-      </header>
-
+    <section className="page">
       {loading ? <LoadingState message="Loading exposure records..." /> : null}
       <ErrorMessage message={error} />
 
-      <div className="panel status-panel">
+      <div className="status-strip">
         <div className="status-row">
-          <span className={`badge ${connected ? 'badge-ok' : 'badge-warn'}`}>
+          <StatusBadge tone={connected ? 'ok' : 'warn'}>
             {connected ? 'Orthanc connected' : 'Orthanc unavailable'}
-          </span>
+          </StatusBadge>
           <span className="status-caption">
             {connected ? 'Exposure data is being retrieved through the backend.' : 'Unable to retrieve Orthanc data.'}
           </span>
         </div>
+        <span className="status-caption">Missing DICOM values are shown as Unavailable.</span>
       </div>
 
-      <div className="panel filter-panel">
-        <div className="field inline-field">
-          <label htmlFor="exposure-search">Search</label>
-          <input
-            id="exposure-search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search by study, patient ID, or modality"
-          />
+      <section className="panel">
+        <div className="toolbar">
+          <div className="field inline-field grow">
+            <label htmlFor="exposure-search">Search</label>
+            <div className="input-icon">
+              <SearchIcon size={16} />
+              <input
+                id="exposure-search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Study date, patient ID, study or series description, modality"
+              />
+            </div>
+          </div>
+          <div className="field inline-field">
+            <label htmlFor="exposure-modality">Modality</label>
+            <select id="exposure-modality" value={modality} onChange={(event) => setModality(event.target.value)}>
+              <option value="all">All modalities</option>
+              {modalities.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              setSearch('');
+              setModality('all');
+            }}
+            disabled={!filtersActive}
+          >
+            Clear filters
+          </button>
         </div>
-        <div className="field inline-field">
-          <label htmlFor="exposure-modality">Modality</label>
-          <select id="exposure-modality" value={modality} onChange={(event) => setModality(event.target.value)}>
-            <option value="all">All modalities</option>
-            {modalities.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
 
-      {filteredRows.length > 0 ? (
-        <ExposureTable rows={filteredRows} />
-      ) : (
-        <div className="empty-state">
-          {connected
-            ? 'No exposure records matched the current filters or no exposure metadata exists in Orthanc.'
-            : 'Orthanc data is unavailable. Connect Orthanc to review exposure metadata.'}
+        <div className="panel-subheader">
+          <span>
+            Showing <strong>{filteredRows.length}</strong> of <strong>{totalRows}</strong> series records
+          </span>
+          <span className="legend">
+            <span><abbr title="Exposure Index">EI</abbr> Exposure Index</span>
+            <span><abbr title="Target Exposure Index">EIT</abbr> Target Exposure Index</span>
+            <span><abbr title="Deviation Index">DI</abbr> Deviation Index</span>
+          </span>
         </div>
-      )}
+
+        {filteredRows.length > 0 ? (
+          <ExposureTable rows={filteredRows} />
+        ) : (
+          <div className="panel-body">
+            <EmptyState
+              title={connected ? 'No exposure records' : 'Orthanc data unavailable'}
+              message={
+                connected
+                  ? 'No exposure records matched the current filters or no exposure metadata exists in Orthanc.'
+                  : 'Orthanc data is unavailable. Connect Orthanc to review exposure metadata.'
+              }
+            />
+          </div>
+        )}
+      </section>
     </section>
   );
 }

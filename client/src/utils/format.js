@@ -51,6 +51,87 @@ export function formatOrthancTimestamp(value) {
   return text;
 }
 
+export function formatActionLabel(value) {
+  const text = formatValue(value, '');
+  if (!text) {
+    return 'Unavailable';
+  }
+
+  const words = text.replace(/[_-]+/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+export function formatRole(role) {
+  if (!role) {
+    return 'System';
+  }
+  return role === 'administrator' ? 'Administrator' : 'Healthcare Practitioner';
+}
+
+export function homePathFor(role) {
+  return role === 'administrator' ? '/admin/dashboard' : '/dashboard';
+}
+
+// SQLite datetime('now') values are UTC without a zone marker; show them in local time.
+export function formatDateTime(value) {
+  const text = formatValue(value, '');
+  if (!text) {
+    return 'Unavailable';
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(:\d{2})?)$/.exec(text);
+  if (!match) {
+    return text;
+  }
+  const date = new Date(`${match[1]}T${match[2]}Z`);
+  if (Number.isNaN(date.getTime())) {
+    return text;
+  }
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export function todayLocal() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
+export function shiftLocalDate(date, days) {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + days);
+  const offset = value.getTimezoneOffset() * 60000;
+  return new Date(value.getTime() - offset).toISOString().slice(0, 10);
+}
+
+export const SCHEDULE_STATUS = {
+  scheduled: { label: 'Scheduled', tone: 'info' },
+  checked_in: { label: 'Checked In', tone: 'info' },
+  in_progress: { label: 'In Progress', tone: 'primary' },
+  completed: { label: 'Completed', tone: 'ok' },
+  cancelled: { label: 'Cancelled', tone: 'neutral' },
+  no_show: { label: 'No-Show', tone: 'warn' },
+};
+
+export const ALERT_TYPE = {
+  no_show: { label: 'No-Show', tone: 'warn' },
+  cancellation: { label: 'Cancellation', tone: 'neutral' },
+  scheduling_conflict: { label: 'Scheduling Conflict', tone: 'danger' },
+  unassigned: { label: 'Unassigned Examination', tone: 'warn' },
+  access: { label: 'Account / Access', tone: 'danger' },
+  system: { label: 'System', tone: 'info' },
+};
+
+export const MODALITY_LABELS = { XR: 'X-Ray', CT: 'CT', MR: 'MRI', US: 'Ultrasound' };
+
+export function getApiError(error, fallback) {
+  return error?.response?.data?.error || fallback;
+}
+
+export function getInitials(name) {
+  const text = formatValue(name, '');
+  return text ? text.slice(0, 2).toUpperCase() : '--';
+}
+
 export function formatStudyModalities(value) {
   const text = formatValue(value, '');
   if (!text) {

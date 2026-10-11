@@ -1,0 +1,110 @@
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import bcrypt from 'bcryptjs';
+
+import { createDatabase } from '../src/db.js';
+import { seedDevelopmentAdmin } from '../src/seed.js';
+
+function withTemporaryDatabase(run) {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'orthoviewplus-test-'),
+  );
+
+  const databasePath = path.join(directory, 'test.db');
+  const db = createDatabase(databasePath);
+
+  try {
+    run(db);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('database initializes required application tables', () => {
+  withTemporaryDatabase((db) => {
+    const tables = db
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table'`,
+      )
+      .all()
+      .map((row) => row.name);
+
+    for (const table of [
+      'users',
+      'audit_logs',
+      'imaging_schedule',
+      'alerts',
+    ]) {
+      assert.ok(tables.includes(table), `Missing table: ${table}`);
+    }
+  });
+});
+
+test('database enables foreign-key enforcement', () => {
+  withTemporaryDatabase((db) => {
+    assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+  });
+});
+
+test('administrator password is stored as a bcrypt hash', () => {
+  withTemporaryDatabase((db) => {
+    const password = 'TestOnly-Password-928!';
+
+    const result = seedDevelopmentAdmin(db, {
+      username: 'test_admin',
+      password,
+    });
+
+    assert.equal(result.created, true);
+
+    const user = db
+      .prepare(
+        'SELECT username, password_hash FROM users WHERE username = ?',
+      )
+      .get('test_admin');
+
+    assert.ok(user);
+    assert.notEqual(user.password_hash, password);
+    assert.match(user.password_hash, /^\$2[aby]\$/);
+    assert.equal(bcrypt.compareSync(password, user.password_hash), true);
+  });
+});
+
+test('administrator seeding does not duplicate an existing account', () => {
+  withTemporaryDatabase((db) => {
+    const credentials = {
+      username: 'test_admin',
+      password: 'TestOnly-Password-928!',
+    };
+
+    assert.equal(seedDevelopmentAdmin(db, credentials).created, true);
+    assert.equal(seedDevelopmentAdmin(db, credentials).created, false);
+
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS total FROM users').get().total,
+      1,
+    );
+  });
+});
+
+test('administrator is not seeded when the password is missing', () => {
+  withTemporaryDatabase((db) => {
+    const result = seedDevelopmentAdmin(db, {
+      username: 'test_admin',
+      password: '',
+    });
+
+    assert.equal(result.created, false);
+
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS total FROM users').get().total,
+      0,
+    );
+  });
+});

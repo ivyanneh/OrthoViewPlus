@@ -1,20 +1,27 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client.js';
 import DashboardCard from '../components/DashboardCard.jsx';
+import EmptyState from '../components/EmptyState.jsx';
 import ErrorMessage from '../components/ErrorMessage.jsx';
 import LoadingState from '../components/LoadingState.jsx';
+import StatusBadge from '../components/StatusBadge.jsx';
+import { LayersIcon, ServerIcon, StackIcon, ImageIcon } from '../components/Icons.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { formatCount, formatOrthancTimestamp, formatValue } from '../utils/format.js';
+import { formatActionLabel, formatCount, formatOrthancTimestamp, formatValue } from '../utils/format.js';
 
-function ActivityTable({ title, rows, columns, emptyMessage }) {
+function ActivityTable({ title, subtitle, rows, columns, emptyMessage }) {
   return (
-    <section className="panel section-panel">
-      <div className="section-heading">
-        <h3>{title}</h3>
+    <section className="panel">
+      <div className="panel-header">
+        <div className="section-heading">
+          <h3>{title}</h3>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+        <span className="panel-count">{rows.length}</span>
       </div>
       {rows.length > 0 ? (
-        <div className="table-wrap">
-          <table className="data-table">
+        <div className="table-wrap flush">
+          <table className="data-table compact-table">
             <thead>
               <tr>
                 {columns.map((column) => (
@@ -26,7 +33,9 @@ function ActivityTable({ title, rows, columns, emptyMessage }) {
               {rows.map((row, index) => (
                 <tr key={`${row.id ?? index}-${index}`}>
                   {columns.map((column) => (
-                    <td key={column.label}>{column.render(row)}</td>
+                    <td key={column.label} className={column.className}>
+                      {column.render(row)}
+                    </td>
                   ))}
                 </tr>
               ))}
@@ -34,8 +43,45 @@ function ActivityTable({ title, rows, columns, emptyMessage }) {
           </table>
         </div>
       ) : (
-        <div className="empty-state compact">{emptyMessage}</div>
+        <div className="panel-body">
+          <EmptyState compact message={emptyMessage} />
+        </div>
       )}
+    </section>
+  );
+}
+
+function AuditTimeline({ rows }) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="section-heading">
+          <h3>Recent Audit Activity</h3>
+          <p>Latest application events recorded by the system</p>
+        </div>
+        <span className="panel-count">{rows.length}</span>
+      </div>
+      <div className="panel-body">
+        {rows.length > 0 ? (
+          <ol className="timeline">
+            {rows.map((row, index) => (
+              <li key={`${row.id ?? index}-${index}`}>
+                <span className="timeline-marker" aria-hidden="true" />
+                <div className="timeline-content">
+                  <div className="timeline-meta">
+                    <span className="action-chip">{formatActionLabel(row.action)}</span>
+                    <span className="mono muted">{formatOrthancTimestamp(row.timestamp)}</span>
+                  </div>
+                  <p>{formatValue(row.description)}</p>
+                  <span className="timeline-user">User: {formatValue(row.username, 'System')}</span>
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <EmptyState compact message="No recent audit entries were returned." />
+        )}
+      </div>
     </section>
   );
 }
@@ -75,26 +121,32 @@ export default function Dashboard() {
   }, []);
 
   const connected = Boolean(summary?.connected);
+  const sourceHint = connected ? 'Orthanc archive statistics' : 'Waiting for Orthanc';
   const cards = [
     {
       title: 'Total Studies',
       value: formatCount(summary?.studies),
-      hint: connected ? 'From Orthanc statistics' : 'Waiting for Orthanc',
+      hint: sourceHint,
+      icon: <LayersIcon size={18} />,
     },
     {
       title: 'Total Series',
       value: formatCount(summary?.series),
-      hint: connected ? 'From Orthanc statistics' : 'Waiting for Orthanc',
+      hint: sourceHint,
+      icon: <StackIcon size={18} />,
     },
     {
       title: 'Total Instances',
       value: formatCount(summary?.instances),
-      hint: connected ? 'From Orthanc statistics' : 'Waiting for Orthanc',
+      hint: sourceHint,
+      icon: <ImageIcon size={18} />,
     },
     {
-      title: 'System Status',
+      title: 'PACS Status',
       value: connected ? 'Connected' : 'Unavailable',
       hint: summary?.version ? `Orthanc ${summary.version}` : 'Connection checked on each load',
+      icon: <ServerIcon size={18} />,
+      tone: connected ? 'ok' : 'warn',
     },
   ];
 
@@ -102,52 +154,49 @@ export default function Dashboard() {
   const auditRows = Array.isArray(summary?.recentAudit) ? summary.recentAudit : [];
 
   return (
-    <section>
-      <header className="page-header">
-        <h2>Dashboard</h2>
-        <p>Welcome, {user?.username}. This dashboard summarizes Orthanc connectivity, imaging volume, and recent activity.</p>
-      </header>
+    <section className="page">
       {loading ? <LoadingState message="Loading workstation status..." /> : null}
       <ErrorMessage message={error} />
       {summary ? (
         <>
-          <div className="card-grid">
-            {cards.map((card) => (
-              <DashboardCard key={card.title} title={card.title} value={card.value} hint={card.hint} />
-            ))}
-          </div>
-          <div className="panel status-panel">
+          <div className="status-strip">
             <div className="status-row">
-              <span className={`badge ${connected ? 'badge-ok' : 'badge-warn'}`}>{formatValue(summary.status)}</span>
+              <StatusBadge tone={connected ? 'ok' : 'warn'}>{formatValue(summary.status)}</StatusBadge>
               <span className="status-caption">
                 {connected ? 'Orthanc is available through the backend.' : 'Orthanc unavailable'}
               </span>
+              {summary.message ? <span className="status-caption">{summary.message}</span> : null}
             </div>
-            {summary.message ? <p>{summary.message}</p> : null}
+            <span className="status-caption">Signed in as {user?.username}</span>
           </div>
+
+          <div className="card-grid">
+            {cards.map((card) => (
+              <DashboardCard
+                key={card.title}
+                title={card.title}
+                value={card.value}
+                hint={card.hint}
+                icon={card.icon}
+                tone={card.tone}
+              />
+            ))}
+          </div>
+
           <div className="dashboard-grid">
             <ActivityTable
               title="Recent Imaging Activity"
+              subtitle="Latest change events reported by Orthanc"
               rows={imagingRows}
               emptyMessage="No recent imaging activity was returned by Orthanc."
               columns={[
-                { label: 'Time', render: (row) => formatOrthancTimestamp(row.timestamp) },
+                { label: 'Time', className: 'mono nowrap', render: (row) => formatOrthancTimestamp(row.timestamp) },
                 { label: 'Event', render: (row) => formatValue(row.type) },
                 { label: 'Resource', render: (row) => formatValue(row.resourceType) },
-                { label: 'Identifier', render: (row) => formatValue(row.id) },
+                { label: 'Identifier', className: 'mono truncate', render: (row) => formatValue(row.id) },
               ]}
             />
-            <ActivityTable
-              title="Recent Audit Activity"
-              rows={auditRows}
-              emptyMessage="No recent audit entries were returned."
-              columns={[
-                { label: 'Time', render: (row) => formatOrthancTimestamp(row.timestamp) },
-                { label: 'User', render: (row) => formatValue(row.username) },
-                { label: 'Action', render: (row) => formatValue(row.action) },
-                { label: 'Details', render: (row) => formatValue(row.description) },
-              ]}
-            />
+            <AuditTimeline rows={auditRows} />
           </div>
         </>
       ) : null}

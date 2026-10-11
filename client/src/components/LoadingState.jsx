@@ -1,7 +1,8 @@
 export default function LoadingState({ message = 'Loading...' }) {
   return (
-    <p className="loading" role="status">
-      {message}
-    </p>
+    <div className="loading" role="status">
+      <span className="spinner" aria-hidden="true" />
+      <span>{message}</span>
+    </div>
   );
 }

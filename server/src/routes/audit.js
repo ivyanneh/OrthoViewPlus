@@ -12,11 +12,16 @@ export function createAuditRouter({ audit }) {
     });
 
     const result = audit.list({
-      limit: req.query.limit,
-      offset: req.query.offset,
+      limit: req.query.limit ? Number(req.query.limit) : undefined,
+      offset: req.query.offset ? Number(req.query.offset) : undefined,
       username: req.query.username,
       action: req.query.action,
       date: req.query.date,
+      role: req.query.role,
+      dateFrom: req.query.dateFrom,
+      dateTo: req.query.dateTo,
+      category: req.query.category,
+      search: req.query.search,
     });
     res.json(result);
   });

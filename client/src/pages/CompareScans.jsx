@@ -1,26 +1,49 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import api from '../api/client.js';
+import EmptyState from '../components/EmptyState.jsx';
 import ErrorMessage from '../components/ErrorMessage.jsx';
 import LoadingState from '../components/LoadingState.jsx';
+import { CompareIcon, ImageIcon, SearchIcon } from '../components/Icons.jsx';
 import { formatDicomDate, formatStudyModalities, formatValue } from '../utils/format.js';
 
-const comparisonFields = [
-  { label: 'Study Date', getValue: (profile) => profile?.studyDate },
-  { label: 'Modality', getValue: (profile) => profile?.primarySeries?.modality },
-  { label: 'Study Description', getValue: (profile) => profile?.studyDescription },
-  { label: 'Series Description', getValue: (profile) => profile?.primarySeries?.seriesDescription },
-  { label: 'Slice Thickness', getValue: (profile) => profile?.primaryInstance?.sliceThickness },
-  { label: 'kVp', getValue: (profile) => profile?.primaryInstance?.kvp },
-  { label: 'Tube Current / mA', getValue: (profile) => profile?.primaryInstance?.tubeCurrent },
-  { label: 'Reconstruction Algorithm', getValue: (profile) => profile?.primaryInstance?.reconstructionAlgorithm },
-  { label: 'Patient ID', getValue: (profile) => profile?.patientId },
-  { label: 'Study ID', getValue: (profile) => profile?.studyId },
-  { label: 'Series Number', getValue: (profile) => profile?.primarySeries?.seriesNumber },
-  { label: 'Series Count', getValue: (profile) => profile?.seriesCount },
-  { label: 'Exposure Index', getValue: (profile) => profile?.primaryInstance?.exposureIndex },
-  { label: 'Target Exposure Index', getValue: (profile) => profile?.primaryInstance?.targetExposureIndex },
-  { label: 'Deviation Index', getValue: (profile) => profile?.primaryInstance?.deviationIndex },
+const comparisonGroups = [
+  {
+    title: 'Study',
+    fields: [
+      { label: 'Study Date', getValue: (profile) => profile?.studyDate },
+      { label: 'Modality', getValue: (profile) => profile?.primarySeries?.modality },
+      { label: 'Study Description', getValue: (profile) => profile?.studyDescription },
+      { label: 'Series Description', getValue: (profile) => profile?.primarySeries?.seriesDescription },
+      { label: 'Patient ID', getValue: (profile) => profile?.patientId },
+      { label: 'Study ID', getValue: (profile) => profile?.studyId },
+      { label: 'Series Number', getValue: (profile) => profile?.primarySeries?.seriesNumber },
+      { label: 'Series Count', getValue: (profile) => profile?.seriesCount },
+    ],
+  },
+  {
+    title: 'Acquisition Parameters',
+    fields: [
+      { label: 'Slice Thickness', getValue: (profile) => profile?.primaryInstance?.sliceThickness },
+      { label: 'kVp', getValue: (profile) => profile?.primaryInstance?.kvp },
+      { label: 'Tube Current / mA', getValue: (profile) => profile?.primaryInstance?.tubeCurrent },
+      { label: 'Reconstruction Algorithm', getValue: (profile) => profile?.primaryInstance?.reconstructionAlgorithm },
+    ],
+  },
+  {
+    title: 'Exposure Indicators',
+    fields: [
+      { label: 'Exposure Index (EI)', getValue: (profile) => profile?.primaryInstance?.exposureIndex },
+      { label: 'Target Exposure Index (EIT)', getValue: (profile) => profile?.primaryInstance?.targetExposureIndex },
+      { label: 'Deviation Index (DI)', getValue: (profile) => profile?.primaryInstance?.deviationIndex },
+    ],
+  },
 ];
+
+function isDifferent(left, right) {
+  const a = formatValue(left, '');
+  const b = formatValue(right, '');
+  return a !== '' && b !== '' && a !== b;
+}
 
 function StudyOption({ study }) {
   return (
@@ -30,31 +53,34 @@ function StudyOption({ study }) {
   );
 }
 
-function ProfileCard({ title, profile }) {
+function StudyViewport({ label, profile }) {
   return (
-    <article className="comparison-card">
-      <div className="comparison-card-header">
-        <p className="comparison-kicker">{title}</p>
-        <h3>{formatValue(profile?.studyDescription)}</h3>
+    <article className="viewport">
+      <header className="viewport-header">
+        <span className="viewport-label">{label}</span>
+        <span className="viewport-title">{profile ? formatValue(profile.studyDescription) : 'No study loaded'}</span>
+      </header>
+      <div className="viewport-canvas">
+        {profile ? (
+          <>
+            <div className="viewport-overlay top-left">
+              <span>ID: {formatValue(profile.patientId)}</span>
+              <span>Study: {formatValue(profile.studyId)}</span>
+            </div>
+            <div className="viewport-overlay top-right">
+              <span>{formatDicomDate(profile.studyDate)}</span>
+              <span>{formatStudyModalities(profile.modalitiesInStudy)}</span>
+            </div>
+            <div className="viewport-overlay bottom-left">
+              <span>{formatValue(profile.primarySeries?.seriesDescription)}</span>
+            </div>
+          </>
+        ) : null}
+        <div className="viewport-placeholder">
+          <ImageIcon size={30} />
+          <span>{profile ? 'Image rendering not available — metadata only' : 'Select a study to load'}</span>
+        </div>
       </div>
-      <dl className="comparison-meta">
-        <div>
-          <dt>Study Date</dt>
-          <dd>{formatDicomDate(profile?.studyDate)}</dd>
-        </div>
-        <div>
-          <dt>Patient ID</dt>
-          <dd>{formatValue(profile?.patientId)}</dd>
-        </div>
-        <div>
-          <dt>Study ID</dt>
-          <dd>{formatValue(profile?.studyId)}</dd>
-        </div>
-        <div>
-          <dt>Modalities</dt>
-          <dd>{formatStudyModalities(profile?.modalitiesInStudy)}</dd>
-        </div>
-      </dl>
     </article>
   );
 }
@@ -139,85 +165,121 @@ export default function CompareScans() {
   const rightProfile = comparison?.right;
 
   return (
-    <section>
-      <header className="page-header">
-        <h2>Compare Scans</h2>
-        <p>Compare study metadata side by side. This module focuses on acquisition details rather than image rendering.</p>
-      </header>
-
+    <section className="page">
       {loadingStudies ? <LoadingState message="Loading available studies..." /> : null}
       <ErrorMessage message={error} />
 
-      <div className="panel comparison-controls">
-        <div className="field inline-field">
-          <label htmlFor="study-search">Search studies</label>
-          <input
-            id="study-search"
-            value={studySearch}
-            onChange={(event) => setStudySearch(event.target.value)}
-            placeholder="Search by study date, description, or patient ID"
-          />
+      <section className="panel">
+        <div className="panel-header">
+          <div className="section-heading">
+            <h3>Study Selection</h3>
+            <p>{studies.length} studies available from Orthanc</p>
+          </div>
         </div>
-        <div className="field inline-field">
-          <label htmlFor="left-study">First study</label>
-          <select id="left-study" value={selectedLeft} onChange={(event) => setSelectedLeft(event.target.value)}>
-            <option value="">Select a study</option>
-            {filteredStudies.map((study) => (
-              <StudyOption key={study.id} study={study} />
-            ))}
-          </select>
+        <div className="toolbar comparison-controls">
+          <div className="field inline-field">
+            <label htmlFor="study-search">Search studies</label>
+            <div className="input-icon">
+              <SearchIcon size={16} />
+              <input
+                id="study-search"
+                value={studySearch}
+                onChange={(event) => setStudySearch(event.target.value)}
+                placeholder="Date, description or patient ID"
+              />
+            </div>
+          </div>
+          <div className="field inline-field">
+            <label htmlFor="left-study">
+              <span className="series-tag">A</span> First study
+            </label>
+            <select id="left-study" value={selectedLeft} onChange={(event) => setSelectedLeft(event.target.value)}>
+              <option value="">Select a study</option>
+              {filteredStudies.map((study) => (
+                <StudyOption key={study.id} study={study} />
+              ))}
+            </select>
+          </div>
+          <div className="field inline-field">
+            <label htmlFor="right-study">
+              <span className="series-tag">B</span> Second study
+            </label>
+            <select id="right-study" value={selectedRight} onChange={(event) => setSelectedRight(event.target.value)}>
+              <option value="">Select a study</option>
+              {filteredStudies.map((study) => (
+                <StudyOption key={study.id} study={study} />
+              ))}
+            </select>
+          </div>
+          <button type="button" className="primary-button" onClick={handleCompare} disabled={loadingComparison}>
+            <CompareIcon size={16} />
+            <span>{loadingComparison ? 'Comparing...' : 'Compare Studies'}</span>
+          </button>
         </div>
-        <div className="field inline-field">
-          <label htmlFor="right-study">Second study</label>
-          <select id="right-study" value={selectedRight} onChange={(event) => setSelectedRight(event.target.value)}>
-            <option value="">Select a study</option>
-            {filteredStudies.map((study) => (
-              <StudyOption key={study.id} study={study} />
-            ))}
-          </select>
-        </div>
-        <button type="button" className="primary-button compare-button" onClick={handleCompare} disabled={loadingComparison}>
-          {loadingComparison ? 'Comparing...' : 'Compare Selected Studies'}
-        </button>
+      </section>
+
+      <div className="viewport-grid">
+        <StudyViewport label="A" profile={leftProfile} />
+        <StudyViewport label="B" profile={rightProfile} />
       </div>
 
       {comparison ? (
-        <>
-          <div className="comparison-grid">
-            <ProfileCard title="Study A" profile={leftProfile} />
-            <ProfileCard title="Study B" profile={rightProfile} />
-          </div>
-          <div className="panel section-panel">
+        <section className="panel">
+          <div className="panel-header">
             <div className="section-heading">
               <h3>Metadata Comparison</h3>
               <p>No clinical conclusion is generated. Missing values are shown as unavailable.</p>
             </div>
-            <div className="table-wrap">
-              <table className="data-table comparison-table">
-                <thead>
-                  <tr>
-                    <th>Field</th>
-                    <th>Study A</th>
-                    <th>Study B</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {comparisonFields.map((field) => (
-                    <tr key={field.label}>
-                      <th scope="row">{field.label}</th>
-                      <td>{formatValue(field.getValue(leftProfile))}</td>
-                      <td>{formatValue(field.getValue(rightProfile))}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <span className="legend">
+              <span className="diff-chip">Differs</span> Values differ between studies
+            </span>
           </div>
-        </>
+          <div className="table-wrap flush">
+            <table className="data-table comparison-table">
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>
+                    <span className="series-tag">A</span> Study A
+                  </th>
+                  <th>
+                    <span className="series-tag">B</span> Study B
+                  </th>
+                  <th className="diff-col" aria-label="Difference" />
+                </tr>
+              </thead>
+              <tbody>
+                {comparisonGroups.map((group) => (
+                  <Fragment key={group.title}>
+                    <tr className="group-row">
+                      <th colSpan={4} scope="colgroup">
+                        {group.title}
+                      </th>
+                    </tr>
+                    {group.fields.map((field) => {
+                      const left = field.getValue(leftProfile);
+                      const right = field.getValue(rightProfile);
+                      const differs = isDifferent(left, right);
+                      return (
+                        <tr key={field.label} className={differs ? 'row-diff' : undefined}>
+                          <th scope="row">{field.label}</th>
+                          <td>{formatValue(left)}</td>
+                          <td>{formatValue(right)}</td>
+                          <td className="diff-col">{differs ? <span className="diff-chip">Differs</span> : null}</td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       ) : (
-        <div className="empty-state">
-          Select two studies, then run the comparison to review side-by-side metadata.
-        </div>
+        <EmptyState
+          title="No comparison loaded"
+          message="Select two studies, then run the comparison to review side-by-side metadata."
+        />
       )}
     </section>
   );

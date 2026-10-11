@@ -1,3 +1,5 @@
+import { AlertIcon } from './Icons.jsx';
+
 export default function ErrorMessage({ message }) {
   if (!message) {
     return null;
@@ -5,7 +7,8 @@ export default function ErrorMessage({ message }) {
 
   return (
     <div className="error-banner" role="alert">
-      {message}
+      <AlertIcon size={16} />
+      <span>{message}</span>
     </div>
   );
 }

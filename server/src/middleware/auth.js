@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 
-export function createAuthMiddleware(jwtSecret) {
+export function createAuthMiddleware(jwtSecret, { getAuthState } = {}) {
   return function requireAuth(req, res, next) {
     const header = req.headers.authorization || '';
     const [scheme, token] = header.split(' ');
@@ -9,17 +9,29 @@ export function createAuthMiddleware(jwtSecret) {
       return res.status(401).json({ error: 'Authentication required.' });
     }
 
+    let payload;
     try {
-      const payload = jwt.verify(token, jwtSecret);
-      req.user = {
-        id: payload.sub,
-        username: payload.username,
-        role: payload.role,
-      };
-      return next();
+      payload = jwt.verify(token, jwtSecret);
     } catch {
       return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
     }
+
+    req.user = {
+      id: payload.sub,
+      username: payload.username,
+      role: payload.role,
+    };
+
+    // Re-check the account on every request so deactivation, restriction and role changes apply immediately.
+    if (getAuthState) {
+      const account = getAuthState(payload.sub);
+      if (!account || account.status !== 'active' || account.restricted) {
+        return res.status(401).json({ error: 'This account is no longer permitted to sign in.' });
+      }
+      req.user = { id: account.id, username: account.username, role: account.role };
+    }
+
+    return next();
   };
 }
 
