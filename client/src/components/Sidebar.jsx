@@ -8,6 +8,7 @@ import {
   CompareIcon,
   DashboardIcon,
   ExposureIcon,
+  ImageIcon,
   LogoMark,
   LogoutIcon,
   MonitorIcon,
@@ -26,6 +27,18 @@ const practitionerSections = [
   },
 ];
 
+const radiologistSections = [
+  {
+    title: 'Radiologist Workspace',
+    links: [
+      { to: '/radiologist/dashboard', label: 'Radiologist Dashboard', Icon: ImageIcon },
+      { to: '/dashboard', label: 'Dashboard', Icon: DashboardIcon },
+      { to: '/exposure-index', label: 'Exposure Index', Icon: ExposureIcon },
+      { to: '/compare-scans', label: 'Compare Scans', Icon: CompareIcon },
+    ],
+  },
+];
+
 const adminSections = [
   {
     title: 'Department',
@@ -34,6 +47,8 @@ const adminSections = [
       { to: '/admin/schedule', label: 'Imaging Schedule', Icon: CalendarIcon },
       { to: '/admin/alerts', label: 'Alerts', Icon: BellIcon },
       { to: '/admin/modalities', label: 'Modality Monitoring', Icon: MonitorIcon },
+      { to: '/admin/imaging-studies', label: 'Orthanc Study Linking', Icon: ImageIcon },
+      { to: '/admin/patients', label: 'Patient Management', Icon: UsersIcon },
     ],
   },
   {
@@ -58,7 +73,8 @@ function NavItem({ to, label, Icon }) {
 export default function Sidebar() {
   const { logout, user } = useAuth();
   const isAdmin = user?.role === 'administrator';
-  const sections = isAdmin ? adminSections : practitionerSections;
+  const isRadiologist = user?.role === 'radiologist';
+  const sections = isAdmin ? adminSections : isRadiologist ? radiologistSections : practitionerSections;
 
   const userBlock = user ? (
     <>

@@ -62,15 +62,29 @@ export function formatActionLabel(value) {
 }
 
 export function formatRole(role) {
-  if (!role) {
-    return 'System';
-  }
-  return role === 'administrator' ? 'Administrator' : 'Healthcare Practitioner';
+  if (role === 'administrator') return 'Administrator';
+  if (role === 'radiologist') return 'Radiologist';
+  if (role === 'practitioner') return 'Practitioner';
+  return role ? String(role) : 'System';
 }
 
 export function homePathFor(role) {
-  return role === 'administrator' ? '/admin/dashboard' : '/dashboard';
+  if (role === 'administrator') return '/admin/dashboard';
+  if (role === 'radiologist') return '/radiologist/dashboard';
+  return '/practitioner/dashboard';
 }
+
+export const APPOINTMENT_STATUS = {
+  scheduled: { label: 'Scheduled', tone: 'info' },
+  completed: { label: 'Completed', tone: 'ok' },
+  cancelled: { label: 'Cancelled', tone: 'neutral' },
+  missed: { label: 'Missed', tone: 'warn' },
+};
+
+export const REPORT_STATUS = {
+  draft: { label: 'Draft', tone: 'warn' },
+  approved: { label: 'Approved', tone: 'ok' },
+};
 
 // SQLite datetime('now') values are UTC without a zone marker; show them in local time.
 export function formatDateTime(value) {

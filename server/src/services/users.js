@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 
-export const ROLES = ['administrator', 'practitioner'];
+export const ROLES = ['administrator', 'practitioner', 'radiologist'];
 export const USER_STATUSES = ['active', 'inactive', 'removed'];
 export const MIN_PASSWORD_LENGTH = 8;
 

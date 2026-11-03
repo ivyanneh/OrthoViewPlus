@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { AppError } from '../utils/http.js';
 
 export function createOrthancService({ url, username, password, timeoutMs = 2500 }) {
   const baseURL = String(url || '').replace(/\/$/, '');
@@ -78,6 +79,58 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
 
   async function getInstanceTags(instanceId) {
     return request('GET', `/instances/${instanceId}/simplified-tags`);
+  }
+
+  async function getInstancePreview(instanceId) {
+    const response = await client.request({
+      method: 'GET',
+      url: `/instances/${instanceId}/preview`,
+      responseType: 'arraybuffer',
+    });
+    return {
+      buffer: Buffer.from(response.data),
+      contentType: response.headers['content-type'] || 'image/jpeg',
+    };
+  }
+
+  async function getInstanceRendered(instanceId, params = {}) {
+    const response = await client.request({
+      method: 'GET',
+      url: `/instances/${instanceId}/rendered`,
+      params,
+      responseType: 'arraybuffer',
+    });
+    return {
+      buffer: Buffer.from(response.data),
+      contentType: response.headers['content-type'] || 'image/png',
+    };
+  }
+
+  async function getInstanceFile(instanceId) {
+    const response = await client.request({
+      method: 'GET',
+      url: `/instances/${instanceId}/file`,
+      responseType: 'arraybuffer',
+      timeout: timeoutMs > 2500 ? timeoutMs : 30000,
+    });
+    return Buffer.from(response.data);
+  }
+
+  async function getStudyExpanded(studyId) {
+    return request('GET', `/studies/${studyId}?expand`);
+  }
+
+  async function listSeriesForStudy(studyId) {
+    const study = await getStudy(studyId);
+    const seriesIds = Array.isArray(study.Series) ? study.Series : [];
+    const series = await Promise.all(seriesIds.map((id) => getSeries(id).catch(() => null)));
+    return series.filter(Boolean).map((item) => ({
+      id: item.ID,
+      modality: item.MainDicomTags?.Modality ?? null,
+      description: item.MainDicomTags?.SeriesDescription ?? null,
+      seriesNumber: item.MainDicomTags?.SeriesNumber ?? null,
+      instances: Array.isArray(item.Instances) ? item.Instances : [],
+    }));
   }
 
   async function getInstanceSearchRows(limit = 150) {
@@ -248,7 +301,11 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
         const limitedIds = Array.isArray(ids) ? ids.slice(0, Math.min(Math.max(Number(limit) || 50, 1), 200)) : [];
         const studies = await Promise.all(limitedIds.map((studyId) => getStudy(studyId).catch(() => null)));
 
-        return studies.filter(Boolean).map((study) => ({
+        const missingStudy = studies.some((study) => !study);
+        if (missingStudy) {
+          throw new AppError('Orthanc returned study identifiers that could not be resolved.', 503);
+        }
+        return studies.map((study) => ({
           id: study.ID,
           patientId: normalizeValue(readTag(study, 'PatientID')),
           patientName: normalizeValue(readTag(study, 'PatientName')),
@@ -259,8 +316,9 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
           modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
           seriesCount: Array.isArray(study.Series) ? study.Series.length : null,
         }));
-      } catch {
-        return [];
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw new AppError('Unable to retrieve imaging studies from Orthanc.', 503);
       }
     }
   }
@@ -359,9 +417,18 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
     getSystem,
     getStatistics,
     getChanges,
+    getStudy,
+    getSeries,
+    getInstance,
+    getInstanceTags,
+    getInstanceFile,
     listStudies,
     getExposureIndexRows,
     getStudyProfile,
+    getStudyExpanded,
+    listSeriesForStudy,
+    getInstancePreview,
+    getInstanceRendered,
     compareStudies,
     getOrthancStatus,
     getRecentActivity,

@@ -1,0 +1,2091 @@
+ORTHOVIEW+ PROMPT 2 CODE AUDIT
+
+
+========================================
+FILE: ai-service\app\main.py
+========================================
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.routes.ai import router as ai_router
+
+app = FastAPI(
+    title="OrthoView+ AI Service",
+    description=(
+        "Assistive medical image processing for OrthoView+. "
+        "Outputs are derived or synthetic and must be reviewed by a radiologist. "
+        "This service does not diagnose patients."
+    ),
+    version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+app.include_router(ai_router, prefix="/api/ai")
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "orthoviewplus-ai",
+        "diagnosis": False,
+        "capabilities": [
+            "restore",
+            "completeness-check",
+            "compare",
+            "reconstruct",
+            "segment-3d",
+            "generate-synthetic",
+            "generate-complementary-view",
+        ],
+        "excluded": ["similar-case-retrieval"],
+    }
+
+
+========================================
+FILE: ai-service\app\routes\ai.py
+========================================
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+
+from app.processing.compare import compare_images
+from app.processing.complementary import complementary_view
+from app.processing.completeness import assess_completeness
+from app.processing.reconstruct import reconstruct
+from app.processing.restore import restore_image
+from app.processing.segment3d import segment_volume
+from app.processing.synthetic import generate_synthetic
+
+router = APIRouter()
+
+
+async def read_required(upload: UploadFile | None, name: str) -> bytes:
+    if upload is None:
+        raise HTTPException(status_code=400, detail=f"{name} is required.")
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{name} is empty.")
+    return data
+
+
+@router.post("/restore")
+async def restore(image: UploadFile = File(...)):
+    return restore_image(await read_required(image, "image"))
+
+
+@router.post("/completeness-check")
+async def completeness(image: UploadFile = File(...), exam_type: str = Form(""), body_part: str = Form("")):
+    return assess_completeness(await read_required(image, "image"), exam_type or body_part)
+
+
+@router.post("/compare")
+async def compare(
+    image: UploadFile = File(...),
+    prior_image: UploadFile = File(...),
+    patient_id: str = Form(""),
+    prior_patient_id: str = Form(""),
+):
+    return compare_images(
+        await read_required(image, "image"),
+        await read_required(prior_image, "prior_image"),
+        patient_id,
+        prior_patient_id,
+    )
+
+
+@router.post("/reconstruct")
+async def reconstruct_anatomy(
+    image: UploadFile = File(...),
+    prior_image: UploadFile = File(...),
+    patient_id: str = Form(""),
+    prior_patient_id: str = Form(""),
+):
+    return reconstruct(
+        await read_required(image, "image"),
+        await read_required(prior_image, "prior_image"),
+        patient_id,
+        prior_patient_id,
+    )
+
+
+@router.post("/segment-3d")
+async def segment(volume: list[UploadFile] = File(default=[])):
+    if not volume:
+        raise HTTPException(status_code=400, detail="A CT/MR series (volume files) is required.")
+    blobs = [await item.read() for item in volume]
+    return segment_volume(blobs)
+
+
+@router.post("/generate-synthetic")
+async def synthetic(notes: str = Form("7")):
+    try:
+        seed = int(notes) if str(notes).isdigit() else 7
+    except ValueError:
+        seed = 7
+    return generate_synthetic(seed)
+
+
+@router.post("/generate-complementary-view")
+async def complementary(image: UploadFile = File(...)):
+    return complementary_view(await read_required(image, "image"))
+
+
+========================================
+FILE: ai-service\app\processing\restore.py
+========================================
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from .io_utils import decode_upload, to_base64
+
+
+METHOD = {
+    "name": "OpenCV non-local means + CLAHE restoration pipeline",
+    "library": "opencv-python-headless",
+    "licence": "Apache-2.0 (OpenCV)",
+    "notes": (
+        "Classical restoration: denoise with fastNlMeansDenoising, local contrast with CLAHE, "
+        "and gentle unsharp masking. This is not a diagnostic enhancement model and does not invent anatomy."
+    ),
+}
+
+
+def restore_image(data: bytes) -> dict:
+    image, metadata = decode_upload(data)
+    denoised = cv2.fastNlMeansDenoising(image, None, h=8, templateWindowSize=7, searchWindowSize=21)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    equalised = clahe.apply(denoised)
+    blur = cv2.GaussianBlur(equalised, (0, 0), 1.0)
+    restored = cv2.addWeighted(equalised, 1.25, blur, -0.25, 0)
+    restored = np.clip(restored, 0, 255).astype(np.uint8)
+
+    residual = cv2.absdiff(image, restored)
+    metrics = {
+        "mean_absolute_change": float(np.mean(residual)),
+        "noise_estimate_original": float(np.mean(cv2.Laplacian(image, cv2.CV_64F) ** 2)),
+        "noise_estimate_restored": float(np.mean(cv2.Laplacian(restored, cv2.CV_64F) ** 2)),
+    }
+    return {
+        "result_kind": "restored_image",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": metrics,
+        "source_metadata": metadata,
+        "warnings": [
+            "The original acquisition is unchanged.",
+            "Restoration may reduce noise but must not be treated as a new diagnostic image.",
+            "Review the original image alongside this output.",
+        ],
+        "label": "AI-restored image — derived, requires radiologist review",
+        "image_base64": to_base64(restored),
+        "experimental": False,
+        "synthetic": False,
+    }
+
+
+========================================
+FILE: ai-service\app\processing\completeness.py
+========================================
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from .io_utils import decode_upload, overlay_mask, to_base64
+
+METHOD = {
+    "name": "Field-of-view coverage heuristic (content bounding box vs frame)",
+    "library": "OpenCV",
+    "licence": "Apache-2.0 (OpenCV)",
+    "notes": (
+        "Estimates whether anatomy is cropped by comparing the content bounding box with the image frame "
+        "and flagging large empty margins or content touching the border."
+    ),
+}
+
+
+def assess_completeness(data: bytes, exam_type: str = "") -> dict:
+    image, metadata = decode_upload(data)
+    blurred = cv2.GaussianBlur(image, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if np.mean(binary) > 127:
+        binary = 255 - binary
+    kernel = np.ones((9, 9), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    coords = cv2.findNonZero(binary)
+    h, w = image.shape[:2]
+    missing_sides = []
+    coverage_ratio = 0.0
+    mask = np.zeros_like(image)
+    if coords is not None:
+        x, y, bw, bh = cv2.boundingRect(coords)
+        coverage_ratio = (bw * bh) / float(w * h)
+        margin = {"left": x / w, "right": (w - (x + bw)) / w, "top": y / h, "bottom": (h - (y + bh)) / h}
+        touches = {
+            "left": x <= 2,
+            "right": x + bw >= w - 2,
+            "top": y <= 2,
+            "bottom": y + bh >= h - 2,
+        }
+        for side, ratio in margin.items():
+            if ratio > 0.12 and not touches[side]:
+                missing_sides.append(side)
+            if touches[side] and ratio < 0.01:
+                missing_sides.append(f"{side}-border-cut")
+        mask[y : y + bh, x : x + bw] = 255
+        cv2.rectangle(mask, (x, y), (x + bw, y + bh), 180, 2)
+    else:
+        missing_sides = ["no-anatomy-detected"]
+
+    exam = (exam_type or "").lower()
+    exam_notes = []
+    if "foot" in exam or "toe" in exam:
+        exam_notes.append("For foot examinations, confirm all toes are included at the distal border.")
+    if "chest" in exam:
+        exam_notes.append("For chest examinations, confirm lung apices and costophrenic angles are included.")
+
+    overlay = overlay_mask(image, 255 - mask if missing_sides else mask, color=(229, 162, 59), alpha=0.35)
+    return {
+        "result_kind": "completeness_assessment",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": {
+            "coverage_ratio": round(float(coverage_ratio), 4),
+            "possible_missing_coverage": sorted(set(missing_sides)),
+        },
+        "source_metadata": metadata,
+        "warnings": [
+            "This is an assistive coverage check, not a determination that the examination is diagnostically adequate.",
+            *exam_notes,
+        ],
+        "label": "Coverage assessment — assistive, requires review",
+        "image_base64": to_base64(overlay),
+        "experimental": False,
+        "synthetic": False,
+    }
+
+
+========================================
+FILE: ai-service\app\processing\compare.py
+========================================
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from .io_utils import decode_upload, to_base64
+
+METHOD = {
+    "name": "ECC affine alignment with absolute-difference heatmap",
+    "library": "OpenCV findTransformECC",
+    "licence": "Apache-2.0 (OpenCV)",
+}
+
+
+def compare_images(current_bytes: bytes, prior_bytes: bytes, patient_id: str = "", prior_patient_id: str = "") -> dict:
+    current, current_meta = decode_upload(current_bytes)
+    prior, prior_meta = decode_upload(prior_bytes)
+
+    current_pid = patient_id or current_meta.get("patient_id") or ""
+    prior_pid = prior_patient_id or prior_meta.get("patient_id") or ""
+    if current_pid and prior_pid and current_pid != prior_pid:
+        return {
+            "result_kind": "comparison_rejected",
+            "method": METHOD,
+            "licence": METHOD["licence"],
+            "metrics": {},
+            "warnings": ["Refused: Patient IDs do not match. Unrelated patients cannot be compared."],
+            "label": "Comparison rejected — patient identity mismatch",
+            "experimental": False,
+            "synthetic": False,
+        }
+
+    prior_resized = cv2.resize(prior, (current.shape[1], current.shape[0]), interpolation=cv2.INTER_AREA)
+    warp = np.eye(2, 3, dtype=np.float32)
+    aligned = prior_resized
+    alignment = "none"
+    try:
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-5)
+        _, warp = cv2.findTransformECC(
+            current.astype(np.float32) / 255.0,
+            prior_resized.astype(np.float32) / 255.0,
+            warp,
+            cv2.MOTION_AFFINE,
+            criteria,
+            None,
+            5,
+        )
+        aligned = cv2.warpAffine(prior_resized, warp, (current.shape[1], current.shape[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+        alignment = "ecc-affine"
+    except cv2.error:
+        alignment = "resize-only"
+
+    diff = cv2.absdiff(current, aligned)
+    heatmap = cv2.applyColorMap(diff, cv2.COLORMAP_INFERNO)
+    current_rgb = cv2.cvtColor(current, cv2.COLOR_GRAY2BGR)
+    blended = cv2.addWeighted(current_rgb, 0.55, heatmap, 0.45, 0)
+
+    return {
+        "result_kind": "longitudinal_comparison",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": {
+            "mean_absolute_difference": float(np.mean(diff)),
+            "alignment": alignment,
+            "current_study_date": current_meta.get("study_date"),
+            "prior_study_date": prior_meta.get("study_date"),
+        },
+        "source_metadata": {"current": current_meta, "prior": prior_meta},
+        "warnings": [
+            "Highlighted regions indicate intensity change after alignment, not a diagnosis.",
+            "Always inspect the original earlier and later acquisitions.",
+        ],
+        "label": "Longitudinal comparison — difference map, requires review",
+        "image_base64": to_base64(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)),
+        "overlay_base64": to_base64(aligned),
+        "experimental": False,
+        "synthetic": False,
+    }
+
+
+========================================
+FILE: ai-service\app\processing\reconstruct.py
+========================================
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from .io_utils import decode_upload, overlay_mask, to_base64
+
+METHOD = {
+    "name": "Prior-exam aligned inpainting of low-signal regions",
+    "library": "OpenCV inpaint + ECC alignment",
+    "licence": "Apache-2.0 (OpenCV)",
+    "notes": "Estimated anatomy from a prior examination of the same patient. Not exact recovery.",
+}
+
+
+def reconstruct(current_bytes: bytes, prior_bytes: bytes, patient_id: str = "", prior_patient_id: str = "") -> dict:
+    current, current_meta = decode_upload(current_bytes)
+    prior, prior_meta = decode_upload(prior_bytes)
+    current_pid = patient_id or current_meta.get("patient_id") or ""
+    prior_pid = prior_patient_id or prior_meta.get("patient_id") or ""
+    if current_pid and prior_pid and current_pid != prior_pid:
+        return {
+            "result_kind": "reconstruction_rejected",
+            "method": METHOD,
+            "licence": METHOD["licence"],
+            "metrics": {},
+            "warnings": ["Refused: prior and current Patient IDs do not match."],
+            "label": "Reconstruction rejected — patient identity mismatch",
+            "experimental": True,
+            "synthetic": False,
+        }
+
+    prior_resized = cv2.resize(prior, (current.shape[1], current.shape[0]))
+    warp = np.eye(2, 3, dtype=np.float32)
+    try:
+        _, warp = cv2.findTransformECC(
+            current.astype(np.float32) / 255.0,
+            prior_resized.astype(np.float32) / 255.0,
+            warp,
+            cv2.MOTION_AFFINE,
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-4),
+            None,
+            5,
+        )
+        aligned = cv2.warpAffine(prior_resized, warp, (current.shape[1], current.shape[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+    except cv2.error:
+        aligned = prior_resized
+
+    missing = (current < 12).astype(np.uint8) * 255
+    missing = cv2.morphologyEx(missing, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8))
+    reconstructed = current.copy()
+    reconstructed[missing > 0] = aligned[missing > 0]
+    reconstructed = cv2.inpaint(reconstructed, missing, 3, cv2.INPAINT_TELEA)
+    # Preserve brighter (likely abnormal or true anatomy) pixels from the current image.
+    reconstructed = np.where(current > 20, current, reconstructed).astype(np.uint8)
+    overlay = overlay_mask(reconstructed, missing, color=(21, 154, 145), alpha=0.4)
+
+    return {
+        "result_kind": "anatomical_reconstruction",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": {
+            "estimated_pixel_fraction": float(np.mean(missing > 0)),
+        },
+        "source_metadata": {"current": current_meta, "prior": prior_meta},
+        "warnings": [
+            "Highlighted pixels are estimated from a prior examination, not recovered from the current acquisition.",
+            "Visible abnormalities in the current image are preserved where signal is present.",
+            "Do not treat this as an exact anatomical recovery.",
+        ],
+        "label": "Estimated reconstruction — generated regions identified on overlay",
+        "image_base64": to_base64(reconstructed),
+        "overlay_base64": to_base64(overlay),
+        "experimental": True,
+        "synthetic": False,
+    }
+
+
+========================================
+FILE: ai-service\app\processing\segment3d.py
+========================================
+from __future__ import annotations
+
+import numpy as np
+from skimage import measure
+
+from .io_utils import decode_upload
+
+METHOD = {
+    "name": "Intensity isosurface (marching cubes) on stacked slices",
+    "library": "scikit-image.measure.marching_cubes",
+    "licence": "BSD-3-Clause (scikit-image)",
+    "notes": "Intended for CT volumes. A single 2D radiograph cannot produce accurate 3D anatomy.",
+}
+
+
+def segment_volume(files: list[bytes]) -> dict:
+    if len(files) < 8:
+        return {
+            "result_kind": "segmentation_rejected",
+            "method": METHOD,
+            "licence": METHOD["licence"],
+            "metrics": {"slice_count": len(files)},
+            "warnings": [
+                "A CT volume with multiple slices is required.",
+                "A single ordinary 2D X-ray does not provide an accurate 3D reconstruction of anatomy.",
+            ],
+            "label": "3D visualisation unavailable — insufficient volume data",
+            "experimental": False,
+            "synthetic": False,
+        }
+
+    slices = []
+    modalities = set()
+    for item in files:
+        image, metadata = decode_upload(item)
+        slices.append(image)
+        if metadata.get("modality"):
+            modalities.add(metadata["modality"])
+    if modalities and not any(mod in {"CT", "MR"} for mod in modalities):
+        return {
+            "result_kind": "segmentation_rejected",
+            "method": METHOD,
+            "licence": METHOD["licence"],
+            "metrics": {"modalities": sorted(modalities)},
+            "warnings": ["3D isosurface visualisation is supported for CT/MR volumes, not projection radiographs."],
+            "label": "3D visualisation unavailable — unsupported modality",
+            "experimental": False,
+            "synthetic": False,
+        }
+
+    volume = np.stack(slices, axis=0).astype(np.float32)
+    volume = volume[::2, ::2, ::2]
+    threshold = float(np.percentile(volume, 85))
+    try:
+        verts, faces, _normals, _values = measure.marching_cubes(volume, level=threshold, step_size=2)
+    except Exception as error:
+        return {
+            "result_kind": "segmentation_failed",
+            "method": METHOD,
+            "licence": METHOD["licence"],
+            "metrics": {},
+            "warnings": [f"Marching cubes failed: {error}"],
+            "label": "3D visualisation failed",
+            "experimental": False,
+            "synthetic": False,
+        }
+
+    verts = verts.astype(np.float32)
+    verts -= verts.mean(axis=0)
+    scale = np.max(np.linalg.norm(verts, axis=1)) or 1.0
+    verts /= scale
+    # Cap mesh size for browser delivery.
+    faces = faces[:25000]
+    return {
+        "result_kind": "anatomical_3d",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": {
+            "slices_used": len(slices),
+            "threshold_percentile": 85,
+            "vertex_count": int(len(verts)),
+            "face_count": int(len(faces)),
+        },
+        "warnings": [
+            "This is a density isosurface, not a validated anatomical segmentation.",
+            "Rotate and inspect the mesh, then compare with the original slices.",
+        ],
+        "label": "3D isosurface derived from volume — requires radiologist review",
+        "mesh": {
+            "vertices": verts.tolist(),
+            "faces": faces.astype(int).tolist(),
+        },
+        "experimental": False,
+        "synthetic": False,
+    }
+
+
+========================================
+FILE: ai-service\app\processing\synthetic.py
+========================================
+from __future__ import annotations
+
+import numpy as np
+
+from .io_utils import to_base64
+
+METHOD = {
+    "name": "Procedural radiographic phantom generator",
+    "library": "NumPy",
+    "licence": "Project code (academic prototype)",
+    "notes": "No patient data is used. Output is synthetic and stored separately from clinical studies.",
+}
+
+
+def generate_synthetic(seed: int = 7) -> dict:
+    rng = np.random.default_rng(int(seed))
+    height, width = 512, 512
+    yy, xx = np.mgrid[0:height, 0:width]
+    image = np.full((height, width), 18.0)
+    # Soft-tissue torso ellipse
+    torso = ((xx - 256) ** 2) / (170**2) + ((yy - 270) ** 2) / (220**2)
+    image[torso < 1] = 70
+    # Lung fields
+    for cx in (190, 322):
+        lungs = ((xx - cx) ** 2) / (70**2) + ((yy - 240) ** 2) / (120**2)
+        image[lungs < 1] = 32
+    # Spine
+    image[np.abs(xx - 256) < 12] += 40
+    # Rib arcs
+    for radius in range(70, 180, 16):
+        dist = np.sqrt((xx - 256) ** 2 + (yy - 210) ** 2)
+        rib = np.abs(dist - radius) < 2.2
+        image[rib] += 28
+    image += rng.normal(0, 4.5, image.shape)
+    image = np.clip(image, 0, 255).astype(np.uint8)
+
+    return {
+        "result_kind": "synthetic_image",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": {"seed": int(seed), "width": width, "height": height},
+        "warnings": [
+            "SYNTHETIC IMAGE. Not a patient examination.",
+            "Do not use this output to represent clinical findings.",
+        ],
+        "label": "SYNTHETIC — demonstration phantom, not a clinical study",
+        "image_base64": to_base64(image),
+        "experimental": False,
+        "synthetic": True,
+        "generation_process": {
+            "type": "procedural_numpy_phantom",
+            "components": ["torso ellipse", "lung fields", "spine", "rib arcs", "gaussian noise"],
+            "seed": int(seed),
+        },
+    }
+
+
+========================================
+FILE: ai-service\app\processing\complementary.py
+========================================
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from .io_utils import decode_upload, to_base64
+
+METHOD = {
+    "name": "Experimental shear/reprojection estimate of a complementary view",
+    "library": "OpenCV geometric transforms",
+    "licence": "Apache-2.0 (OpenCV)",
+    "notes": "Research prototype. Never a substitute for a required clinical projection.",
+}
+
+
+def complementary_view(data: bytes) -> dict:
+    image, metadata = decode_upload(data)
+    h, w = image.shape[:2]
+    # Horizontal intensity projection expanded into an estimated orthogonal-looking image.
+    profile = image.mean(axis=1)
+    estimated = np.tile(profile.reshape(h, 1), (1, w))
+    shear = np.float32([[1, 0.35, 0], [0, 1, 0]])
+    warped = cv2.warpAffine(image, shear, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    mixed = cv2.addWeighted(estimated.astype(np.uint8), 0.45, warped, 0.55, 0)
+    mixed = cv2.GaussianBlur(mixed, (0, 0), 1.2)
+
+    return {
+        "result_kind": "complementary_view",
+        "method": METHOD,
+        "licence": METHOD["licence"],
+        "metrics": {"source_rows": h, "source_columns": w},
+        "source_metadata": metadata,
+        "warnings": [
+            "SYNTHETIC / ESTIMATED VIEW. This is not an acquired projection.",
+            "It must never replace a required clinical examination.",
+            "This capability is experimental.",
+        ],
+        "label": "SYNTHETIC complementary view — estimated, not acquired",
+        "image_base64": to_base64(mixed),
+        "experimental": True,
+        "synthetic": True,
+    }
+
+
+========================================
+FILE: ai-service\tests\test_processing.py
+========================================
+import numpy as np
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.processing.restore import restore_image
+from app.processing.synthetic import generate_synthetic
+from app.processing.io_utils import encode_png
+
+
+client = TestClient(app)
+
+
+def _png_bytes():
+    image = np.linspace(0, 255, 64 * 64, dtype=np.uint8).reshape(64, 64)
+    image[:, :8] = 0
+    return encode_png(image)
+
+
+def test_health():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["diagnosis"] is False
+    assert "similar-case-retrieval" in response.json()["excluded"]
+
+
+def test_restore_changes_image_but_returns_metrics():
+    result = restore_image(_png_bytes())
+    assert result["image_base64"]
+    assert "mean_absolute_change" in result["metrics"]
+    assert result["synthetic"] is False
+
+
+def test_synthetic_is_labelled():
+    result = generate_synthetic(3)
+    assert result["synthetic"] is True
+    assert "SYNTHETIC" in result["label"]
+    assert result["generation_process"]["seed"] == 3
+
+
+def test_restore_endpoint():
+    files = {"image": ("demo.png", _png_bytes(), "image/png")}
+    response = client.post("/api/ai/restore", files=files)
+    assert response.status_code == 200
+    assert response.json()["result_kind"] == "restored_image"
+
+
+========================================
+FILE: server\src\index.js
+========================================
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import { createDatabase } from './db.js';
+import { seedDemoAccounts, seedDemoClinicalData } from './seed.js';
+import { createAuditService } from './services/audit.js';
+import { createOrthancService } from './services/orthanc.js';
+import { createAuthMiddleware, createRoleMiddleware } from './middleware/auth.js';
+import { createAuthRouter } from './routes/auth.js';
+import { createHealthRouter } from './routes/health.js';
+import { createAuditRouter } from './routes/audit.js';
+import { createDashboardRouter } from './routes/dashboard.js';
+import { createExposureRouter } from './routes/exposure.js';
+import { createCompareRouter } from './routes/compare.js';
+import { createAdminRouter } from './routes/admin.js';
+import { createClinicalRouter } from './routes/clinical.js';
+import { createImagingRouter } from './routes/imaging.js';
+import { createAiRouter } from './routes/ai.js';
+import { createStatsRouter } from './routes/stats.js';
+import { createUserService } from './services/users.js';
+import { createAlertService } from './services/alerts.js';
+import { createScheduleService } from './services/schedule.js';
+import { createNotificationService } from './services/notifications.js';
+import { createPatientService } from './services/patients.js';
+import { createAppointmentService } from './services/appointments.js';
+import { createRequestService } from './services/requests.js';
+import { createReportService } from './services/reports.js';
+import { createStudyService } from './services/studies.js';
+import { createAiClient } from './services/aiClient.js';
+import { createAiJobService } from './services/aiJobs.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
+
+const PORT = Number(process.env.PORT) || 3001;
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
+const DATABASE_PATH = path.resolve(__dirname, '..', process.env.DATABASE_PATH || './data/orthoviewplus.db');
+const AI_RESULTS_DIR = path.resolve(__dirname, '..', process.env.AI_RESULTS_DIR || './data/ai-results');
+
+if (!JWT_SECRET || JWT_SECRET === 'change-this-to-a-long-random-string') {
+  console.warn('Warning: JWT_SECRET is missing or still set to the example value. Set a unique secret before deployment.');
+}
+
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET must be set in server/.env or the project .env file.');
+}
+
+const db = createDatabase(DATABASE_PATH);
+const seedResult = seedDemoAccounts(db, {
+  adminUsername: process.env.DEV_ADMIN_USERNAME,
+  adminPassword: process.env.DEV_ADMIN_PASSWORD,
+  practitionerUsername: process.env.DEV_PRACTITIONER_USERNAME,
+  practitionerPassword: process.env.DEV_PRACTITIONER_PASSWORD,
+  radiologistUsername: process.env.DEV_RADIOLOGIST_USERNAME,
+  radiologistPassword: process.env.DEV_RADIOLOGIST_PASSWORD,
+});
+seedDemoClinicalData(db);
+
+const audit = createAuditService(db);
+const users = createUserService(db);
+const alerts = createAlertService(db);
+const notifications = createNotificationService(db);
+const patients = createPatientService(db);
+const appointments = createAppointmentService(db, { notifications, alerts });
+const requests = createRequestService(db, { notifications });
+const reports = createReportService(db, { notifications });
+const studies = createStudyService(db);
+const schedule = createScheduleService(db, { alerts });
+const orthanc = createOrthancService({
+  url: process.env.ORTHANC_URL || 'http://localhost:8042',
+  username: process.env.ORTHANC_USERNAME,
+  password: process.env.ORTHANC_PASSWORD,
+  timeoutMs: Number(process.env.ORTHANC_TIMEOUT_MS) || 20000,
+});
+const aiClient = createAiClient({
+  baseUrl: process.env.AI_SERVICE_URL || 'http://localhost:8000',
+});
+const aiJobs = createAiJobService(db, {
+  aiClient,
+  orthanc,
+  resultsDirectory: AI_RESULTS_DIR,
+  audit,
+});
+
+const requireAuth = createAuthMiddleware(JWT_SECRET, { getAuthState: users.getAuthState });
+const requireAdministrator = createRoleMiddleware('administrator');
+const requireRadiologist = createRoleMiddleware('radiologist');
+const requireClinical = createRoleMiddleware(['practitioner', 'radiologist']);
+
+appointments.processOverdue();
+setInterval(() => {
+  try {
+    appointments.processOverdue();
+  } catch (error) {
+    console.error('Appointment status processor failed:', error.message);
+  }
+}, 60 * 1000).unref();
+
+const app = express();
+app.use(cors({ origin: CLIENT_ORIGIN }));
+app.use(express.json({ limit: '2mb' }));
+
+app.use('/api/health', createHealthRouter({ orthanc, aiClient }));
+app.use('/api/auth', createAuthRouter({ db, audit, alerts, users, jwtSecret: JWT_SECRET, jwtExpiresIn: JWT_EXPIRES_IN, requireAuth }));
+app.use('/api/audit', requireAuth, requireAdministrator, createAuditRouter({ audit }));
+app.use('/api/admin', requireAuth, requireAdministrator, createAdminRouter({ db, audit, users, schedule, alerts, orthanc }));
+app.use('/api/stats', requireAuth, requireAdministrator, createStatsRouter({ db, users, patients, appointments, orthanc, audit }));
+app.use('/api/dashboard', requireAuth, createDashboardRouter({ orthanc, audit }));
+app.use('/api/exposure', requireAuth, requireClinical, createExposureRouter({ orthanc, audit }));
+app.use('/api/compare', requireAuth, requireClinical, createCompareRouter({ orthanc, audit }));
+app.use('/api/clinical', requireAuth, createClinicalRouter({ patients, appointments, requests, reports, studies, notifications, audit, users }));
+app.use('/api/imaging', requireAuth, requireClinical, createImagingRouter({ orthanc, studies, patients, audit }));
+app.use('/api/ai', requireAuth, requireRadiologist, createAiRouter({ aiJobs, aiClient }));
+
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  res.status(500).json({ error: 'An unexpected server error occurred.' });
+});
+
+app.listen(PORT, () => {
+  console.log(`OrthoView+ API listening on http://localhost:${PORT}`);
+  console.log(`SQLite database: ${DATABASE_PATH}`);
+  if (seedResult.some((item) => item.created)) {
+    console.log('Development demo accounts were created where missing.');
+  }
+});
+
+
+========================================
+FILE: server\src\db.js
+========================================
+import fs from 'node:fs';
+import path from 'node:path';
+import Database from 'better-sqlite3';
+
+export function createDatabase(databasePath) {
+  const directory = path.dirname(databasePath);
+  fs.mkdirSync(directory, { recursive: true });
+
+  const db = new Database(databasePath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'practitioner',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      target TEXT,
+      description TEXT,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+  `);
+
+  migrateUsers(db);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS imaging_schedule (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      examination TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      reference TEXT,
+      assigned_user_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      notes TEXT,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (assigned_user_id) REFERENCES users(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      description TEXT NOT NULL,
+      resource TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      reviewed_by INTEGER,
+      reviewed_at TEXT,
+      FOREIGN KEY (reviewed_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_schedule_date ON imaging_schedule(scheduled_date, scheduled_time);
+    CREATE INDEX IF NOT EXISTS idx_schedule_status ON imaging_schedule(status);
+    CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+
+    CREATE TABLE IF NOT EXISTS patients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mrn TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      first_name TEXT NOT NULL,
+      last_name TEXT NOT NULL,
+      date_of_birth TEXT,
+      sex TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS appointments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL,
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      examination TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      assigned_user_id INTEGER,
+      requested_by INTEGER,
+      status TEXT NOT NULL DEFAULT 'scheduled'
+        CHECK (status IN ('scheduled', 'completed', 'cancelled', 'missed')),
+      notes TEXT,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      completed_at TEXT,
+      missed_at TEXT,
+      grace_alert_sent INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (assigned_user_id) REFERENCES users(id),
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS imaging_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL,
+      appointment_id INTEGER,
+      requested_by INTEGER NOT NULL,
+      assigned_radiologist_id INTEGER,
+      examination TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'routine' CHECK (priority IN ('routine', 'urgent')),
+      clinical_indication TEXT,
+      status TEXT NOT NULL DEFAULT 'submitted'
+        CHECK (status IN ('submitted', 'scheduled', 'in_progress', 'completed', 'cancelled')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id),
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (assigned_radiologist_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS imaging_studies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER,
+      appointment_id INTEGER,
+      imaging_request_id INTEGER,
+      orthanc_study_id TEXT,
+      study_instance_uid TEXT,
+      study_date TEXT,
+      modality TEXT,
+      description TEXT,
+      source TEXT NOT NULL DEFAULT 'original'
+        CHECK (source IN ('original', 'ai_derived', 'synthetic')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id),
+      FOREIGN KEY (imaging_request_id) REFERENCES imaging_requests(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS radiology_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      imaging_study_id INTEGER,
+      patient_id INTEGER NOT NULL,
+      imaging_request_id INTEGER,
+      radiologist_id INTEGER NOT NULL,
+      findings TEXT,
+      impression TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      approved_at TEXT,
+      FOREIGN KEY (imaging_study_id) REFERENCES imaging_studies(id),
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (imaging_request_id) REFERENCES imaging_requests(id),
+      FOREIGN KEY (radiologist_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      resource_type TEXT,
+      resource_id TEXT,
+      read_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      capability TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+      requested_by INTEGER NOT NULL,
+      patient_id INTEGER,
+      source_study_id INTEGER,
+      orthanc_instance_id TEXT,
+      input_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT,
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (source_study_id) REFERENCES imaging_studies(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      capability TEXT NOT NULL,
+      source_study_id INTEGER,
+      result_kind TEXT NOT NULL,
+      file_path TEXT,
+      overlay_path TEXT,
+      metadata_json TEXT,
+      label TEXT NOT NULL,
+      review_status TEXT NOT NULL DEFAULT 'pending_review'
+        CHECK (review_status IN ('pending_review', 'reviewed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (job_id) REFERENCES ai_jobs(id),
+      FOREIGN KEY (source_study_id) REFERENCES imaging_studies(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_patients_mrn ON patients(mrn);
+    CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(last_name, first_name);
+    CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(scheduled_date, scheduled_time);
+    CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments(status);
+    CREATE INDEX IF NOT EXISTS idx_appointments_patient ON appointments(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_patient ON imaging_requests(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_status ON imaging_requests(status);
+    CREATE INDEX IF NOT EXISTS idx_studies_patient ON imaging_studies(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_studies_orthanc ON imaging_studies(orthanc_study_id);
+    CREATE INDEX IF NOT EXISTS idx_reports_patient ON radiology_reports(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_reports_status ON radiology_reports(status);
+    CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_status ON ai_jobs(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ai_results_job ON ai_results(job_id);
+  `);
+
+  return db;
+}
+
+// Additive, idempotent migration: existing rows keep their data and default to an active, unrestricted account.
+function migrateUsers(db) {
+  const existing = new Set(db.prepare('PRAGMA table_info(users)').all().map((column) => column.name));
+  const columns = [
+    ['full_name', 'TEXT'],
+    ['email', 'TEXT'],
+    ['department', 'TEXT'],
+    ['status', "TEXT NOT NULL DEFAULT 'active'"],
+    ['restricted', 'INTEGER NOT NULL DEFAULT 0'],
+    ['restriction_reason', 'TEXT'],
+    ['updated_at', 'TEXT'],
+    ['last_login_at', 'TEXT'],
+  ];
+
+  for (const [name, definition] of columns) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
+    }
+  }
+}
+
+
+========================================
+FILE: server\src\middleware\auth.js
+========================================
+import jwt from 'jsonwebtoken';
+
+export function createAuthMiddleware(jwtSecret, { getAuthState } = {}) {
+  return function requireAuth(req, res, next) {
+    const header = req.headers.authorization || '';
+    const [scheme, token] = header.split(' ');
+
+    if (scheme !== 'Bearer' || !token) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(token, jwtSecret);
+    } catch {
+      return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
+    }
+
+    req.user = {
+      id: payload.sub,
+      username: payload.username,
+      role: payload.role,
+    };
+
+    // Re-check the account on every request so deactivation, restriction and role changes apply immediately.
+    if (getAuthState) {
+      const account = getAuthState(payload.sub);
+      if (!account || account.status !== 'active' || account.restricted) {
+        return res.status(401).json({ error: 'This account is no longer permitted to sign in.' });
+      }
+      req.user = { id: account.id, username: account.username, role: account.role };
+    }
+
+    return next();
+  };
+}
+
+export function createRoleMiddleware(allowedRoles) {
+  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+
+  return function requireRole(req, res, next) {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'You do not have permission to perform this action.' });
+    }
+
+    return next();
+  };
+}
+
+
+========================================
+FILE: server\src\routes\clinical.js
+========================================
+import { Router } from 'express';
+import { handleRoute } from '../utils/http.js';
+
+export function createClinicalRouter({
+  patients,
+  appointments,
+  requests,
+  reports,
+  studies,
+  notifications,
+  audit,
+  users,
+}) {
+  const router = Router();
+
+  function log(req, action, target, description) {
+    audit.log({
+      userId: req.user?.id ?? null,
+      action,
+      target,
+      description: `User "${req.user?.username ?? 'unknown'}" ${description}`,
+    });
+  }
+
+  router.get(
+    '/patients',
+    handleRoute((req, res) => {
+      res.json({ patients: patients.search({ query: req.query.q, status: req.query.status || 'active' }) });
+    }),
+  );
+
+  router.post(
+    '/patients',
+    handleRoute((req, res) => {
+      if (!['administrator', 'practitioner'].includes(req.user.role)) {
+        return res.status(403).json({ error: 'You do not have permission to register patients.' });
+      }
+      const patient = patients.create({ ...req.body, createdBy: req.user.id });
+      log(req, 'patient_create', `patient:${patient.id}`, `registered patient ${patient.mrn}.`);
+      res.status(201).json({ patient });
+    }),
+  );
+
+  router.get(
+    '/patients/:id',
+    handleRoute((req, res) => {
+      const patient = patients.requirePatient(req.params.id);
+      const history = {
+        appointments: appointments.list({ patientId: patient.id }),
+        requests: requests.list({ patientId: patient.id }),
+        studies: studies.list({ patientId: patient.id, source: 'all' }),
+        reports: reports.list({
+          patientId: patient.id,
+          status: req.user.role === 'practitioner' ? 'approved' : 'all',
+        }),
+      };
+      log(req, 'patient_view', `patient:${patient.id}`, `viewed patient ${patient.mrn}.`);
+      res.json({ patient, history });
+    }),
+  );
+
+  router.patch(
+    '/patients/:id',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'administrator') {
+        return res.status(403).json({ error: 'You do not have permission to edit patient records.' });
+      }
+      const patient = patients.update(req.params.id, req.body || {});
+      log(req, 'patient_update', `patient:${patient.id}`, `updated patient ${patient.mrn}.`);
+      res.json({ patient });
+    }),
+  );
+
+  router.get(
+    '/appointments',
+    handleRoute((req, res) => {
+      res.json({
+        appointments: appointments.list({
+          status: req.query.status,
+          dateFrom: req.query.dateFrom,
+          dateTo: req.query.dateTo,
+          patientId: req.query.patientId,
+        }),
+        counts: appointments.counts(),
+      });
+    }),
+  );
+
+  router.post(
+    '/appointments',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'administrator' && req.user.role !== 'practitioner') {
+        return res.status(403).json({ error: 'You do not have permission to schedule appointments.' });
+      }
+      const appointment = appointments.create({
+        ...req.body,
+        createdBy: req.user.id,
+        requestedBy: req.body.requestedBy || req.user.id,
+      });
+      log(req, 'appointment_create', `appointment:${appointment.id}`, `scheduled ${appointment.examination}.`);
+      res.status(201).json({ appointment });
+    }),
+  );
+
+  router.post(
+    '/appointments/:id/status',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'administrator') {
+        return res.status(403).json({ error: 'Only administrators can change appointment status.' });
+      }
+      const appointment = appointments.setStatus(req.params.id, req.body?.status, req.user.id);
+      log(req, 'appointment_status', `appointment:${appointment.id}`, `set appointment status to ${appointment.status}.`);
+      res.json({ appointment });
+    }),
+  );
+
+  router.get(
+    '/requests',
+    handleRoute((req, res) => {
+      const filters = {
+        status: req.query.status,
+        patientId: req.query.patientId,
+      };
+      if (req.user.role === 'practitioner') {
+        filters.requestedBy = req.user.id;
+      }
+      if (req.user.role === 'radiologist' && req.query.mine === 'true') {
+        filters.assignedRadiologistId = req.user.id;
+      }
+      res.json({ requests: requests.list(filters) });
+    }),
+  );
+
+  router.post(
+    '/requests',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'practitioner' && req.user.role !== 'administrator') {
+        return res.status(403).json({ error: 'You do not have permission to submit imaging requests.' });
+      }
+      const request = requests.create({ ...req.body, requestedBy: req.user.id });
+      log(req, 'imaging_request_create', `request:${request.id}`, `submitted imaging request ${request.examination}.`);
+      res.status(201).json({ request });
+    }),
+  );
+
+  router.post(
+    '/requests/:id/assign',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'radiologist') {
+        return res.status(403).json({ error: 'Only radiologists can claim examinations.' });
+      }
+      const request = requests.assign(req.params.id, req.user.id);
+      log(req, 'imaging_request_assign', `request:${request.id}`, 'claimed an imaging request.');
+      res.json({ request });
+    }),
+  );
+
+  router.get(
+    '/reports',
+    handleRoute((req, res) => {
+      const filters = { patientId: req.query.patientId, status: req.query.status };
+      if (req.user.role === 'practitioner') {
+        filters.status = 'approved';
+      }
+      if (req.user.role === 'radiologist' && req.query.mine === 'true') {
+        filters.radiologistId = req.user.id;
+      }
+      res.json({ reports: reports.list(filters) });
+    }),
+  );
+
+  router.post(
+    '/reports',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'radiologist') {
+        return res.status(403).json({ error: 'Only radiologists can prepare reports.' });
+      }
+      const report = reports.saveDraft({ ...req.body, radiologistId: req.user.id });
+      log(req, 'report_draft', `report:${report.id}`, 'saved a radiology report draft.');
+      res.json({ report });
+    }),
+  );
+
+  router.post(
+    '/reports/:id/approve',
+    handleRoute((req, res) => {
+      if (req.user.role !== 'radiologist') {
+        return res.status(403).json({ error: 'Only radiologists can approve reports.' });
+      }
+      const report = reports.approve(req.params.id, req.user.id);
+      log(req, 'report_approve', `report:${report.id}`, `approved report for ${report.mrn}.`);
+      res.json({ report });
+    }),
+  );
+
+  router.get(
+    '/notifications',
+    handleRoute((req, res) => {
+      res.json({
+        notifications: notifications.listForUser(req.user.id, { unreadOnly: req.query.unread === 'true' }),
+        unread: notifications.unreadCount(req.user.id),
+      });
+    }),
+  );
+
+  router.post(
+    '/notifications/:id/read',
+    handleRoute((req, res) => {
+      res.json({ notification: notifications.markRead(req.params.id, req.user.id) });
+    }),
+  );
+
+  router.post(
+    '/notifications/read-all',
+    handleRoute((req, res) => {
+      notifications.markAllRead(req.user.id);
+      res.json({ ok: true });
+    }),
+  );
+
+  router.get(
+    '/staff',
+    handleRoute((_req, res) => {
+      res.json({
+        radiologists: users.list().filter((user) => user.role === 'radiologist' && user.status === 'active'),
+        practitioners: users.list().filter((user) => user.role === 'practitioner' && user.status === 'active'),
+      });
+    }),
+  );
+
+  return router;
+}
+
+
+========================================
+FILE: server\src\routes\imaging.js
+========================================
+import { Router } from 'express';
+import { handleRoute } from '../utils/http.js';
+
+export function createImagingRouter({ orthanc, studies, patients, audit }) {
+  const router = Router();
+
+  function log(req, action, target, description) {
+    audit.log({
+      userId: req.user?.id ?? null,
+      action,
+      target,
+      description: `User "${req.user?.username ?? 'unknown'}" ${description}`,
+    });
+  }
+
+  router.get(
+    '/studies',
+    handleRoute(async (req, res) => {
+      const list = await orthanc.listStudies({ limit: Number(req.query.limit) || 80 });
+      log(req, 'view_studies', 'orthanc', 'listed imaging studies.');
+      res.json({ studies: list, orthanc: await orthanc.getHealth() });
+    }),
+  );
+
+  router.get(
+    '/studies/:id',
+    handleRoute(async (req, res) => {
+      const profile = await orthanc.getStudyProfile(req.params.id);
+      const series = await orthanc.listSeriesForStudy(req.params.id);
+      const matchedPatient = profile.patientId
+        ? patients.search({ query: profile.patientId, status: 'all' }).find((row) => row.mrn.toLowerCase() === String(profile.patientId).toLowerCase())
+        : null;
+      if (matchedPatient) {
+        studies.upsertOrthancStudy({
+          patientId: matchedPatient.id,
+          orthancStudyId: req.params.id,
+          studyInstanceUid: profile.studyInstanceUID,
+          studyDate: profile.studyDate,
+          modality: profile.primarySeries?.modality,
+          description: profile.studyDescription,
+        });
+      }
+      log(req, 'view_study', `orthanc-study:${req.params.id}`, 'opened an imaging study.');
+      res.json({ study: profile, series, linkedPatient: matchedPatient || null });
+    }),
+  );
+
+  router.get(
+    '/instances/:id/preview',
+    handleRoute(async (req, res) => {
+      const preview = await orthanc.getInstancePreview(req.params.id);
+      res.setHeader('Content-Type', preview.contentType);
+      res.setHeader('Cache-Control', 'private, max-age=60');
+      res.send(preview.buffer);
+    }),
+  );
+
+  router.get(
+    '/instances/:id/rendered',
+    handleRoute(async (req, res) => {
+      const rendered = await orthanc.getInstanceRendered(req.params.id, {
+        'window-center': req.query.windowCenter,
+        'window-width': req.query.windowWidth,
+      });
+      res.setHeader('Content-Type', rendered.contentType);
+      res.send(rendered.buffer);
+    }),
+  );
+
+  router.get(
+    '/instances/:id/tags',
+    handleRoute(async (req, res) => {
+      const tags = await orthanc.getInstanceTags(req.params.id);
+      res.json({ tags });
+    }),
+  );
+
+  return router;
+}
+
+
+========================================
+FILE: server\src\routes\ai.js
+========================================
+import fs from 'node:fs';
+import { Router } from 'express';
+import { handleRoute } from '../utils/http.js';
+
+export function createAiRouter({ aiJobs, aiClient }) {
+  const router = Router();
+
+  router.get(
+    '/health',
+    handleRoute(async (_req, res) => {
+      res.json(await aiClient.health());
+    }),
+  );
+
+  router.get(
+    '/jobs',
+    handleRoute((req, res) => {
+      res.json({ jobs: aiJobs.list({ requestedBy: req.user.id }) });
+    }),
+  );
+
+  router.get(
+    '/jobs/:id',
+    handleRoute((req, res) => {
+      const job = aiJobs.getJob(req.params.id);
+      if (!job) {
+        return res.status(404).json({ error: 'AI job not found.' });
+      }
+      if (Number(job.requestedBy) !== Number(req.user.id) && req.user.role !== 'radiologist') {
+        return res.status(403).json({ error: 'You do not have permission to view this job.' });
+      }
+      res.json({ job });
+    }),
+  );
+
+  router.post(
+    '/jobs',
+    handleRoute((req, res) => {
+      const job = aiJobs.enqueue({
+        capability: req.body?.capability,
+        requestedBy: req.user.id,
+        patientId: req.body?.patientId,
+        sourceStudyId: req.body?.sourceStudyId,
+        input: req.body?.input || {},
+        auditUser: req.user.id,
+      });
+      res.status(202).json({ job });
+    }),
+  );
+
+  router.post(
+    '/results/:id/review',
+    handleRoute((req, res) => {
+      res.json({ result: aiJobs.markReviewed(req.params.id, req.user.id) });
+    }),
+  );
+
+  function sendStoredFile(res, filePath, fallbackName) {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: `${fallbackName} is not available.` });
+    }
+    if (filePath.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json');
+    } else {
+      res.setHeader('Content-Type', 'image/png');
+    }
+    return fs.createReadStream(filePath).pipe(res);
+  }
+
+  router.get(
+    '/results/:id/file',
+    handleRoute((req, res) => {
+      const result = aiJobs.getResult(req.params.id);
+      if (!result) {
+        return res.status(404).json({ error: 'AI result not found.' });
+      }
+      return sendStoredFile(res, result.filePath, 'Result file');
+    }),
+  );
+
+  router.get(
+    '/results/:id/overlay',
+    handleRoute((req, res) => {
+      const result = aiJobs.getResult(req.params.id);
+      if (!result) {
+        return res.status(404).json({ error: 'AI result not found.' });
+      }
+      return sendStoredFile(res, result.overlayPath, 'Overlay');
+    }),
+  );
+
+  return router;
+}
+
+
+========================================
+FILE: server\src\services\orthanc.js
+========================================
+import axios from 'axios';
+
+export function createOrthancService({ url, username, password, timeoutMs = 2500 }) {
+  const baseURL = String(url || '').replace(/\/$/, '');
+  const client = axios.create({
+    baseURL,
+    timeout: timeoutMs,
+    auth: username ? { username, password } : undefined,
+    validateStatus: (status) => status >= 200 && status < 300,
+  });
+
+  function isAvailableError(error) {
+    return !error?.response;
+  }
+
+  function readTag(source, tagName) {
+    return source?.RequestedTags?.[tagName] ?? source?.MainDicomTags?.[tagName] ?? source?.[tagName] ?? null;
+  }
+
+  function normalizeValue(value) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      return value.length > 0 ? value.join(', ') : null;
+    }
+
+    return value;
+  }
+
+  function formatActivity(change) {
+    return {
+      id: change.ID,
+      type: change.ChangeType,
+      resourceType: change.ResourceType,
+      timestamp: change.Date,
+      path: change.Path,
+    };
+  }
+
+  async function request(method, path, data) {
+    const response = await client.request({ method, url: path, data });
+    return response.data;
+  }
+
+  async function getSystem() {
+    return request('GET', '/system');
+  }
+
+  async function getStatistics() {
+    return request('GET', '/statistics');
+  }
+
+  async function getChanges(limit = 10) {
+    return request('GET', `/changes?limit=${limit}`);
+  }
+
+  async function findResources(level, options = {}) {
+    return request('POST', '/tools/find', {
+      Level: level,
+      Expand: true,
+      ...options,
+    });
+  }
+
+  async function getStudy(studyId) {
+    return request('GET', `/studies/${studyId}`);
+  }
+
+  async function getSeries(seriesId) {
+    return request('GET', `/series/${seriesId}`);
+  }
+
+  async function getInstance(instanceId) {
+    return request('GET', `/instances/${instanceId}`);
+  }
+
+  async function getInstanceTags(instanceId) {
+    return request('GET', `/instances/${instanceId}/simplified-tags`);
+  }
+
+  async function getInstancePreview(instanceId) {
+    const response = await client.request({
+      method: 'GET',
+      url: `/instances/${instanceId}/preview`,
+      responseType: 'arraybuffer',
+    });
+    return {
+      buffer: Buffer.from(response.data),
+      contentType: response.headers['content-type'] || 'image/jpeg',
+    };
+  }
+
+  async function getInstanceRendered(instanceId, params = {}) {
+    const response = await client.request({
+      method: 'GET',
+      url: `/instances/${instanceId}/rendered`,
+      params,
+      responseType: 'arraybuffer',
+    });
+    return {
+      buffer: Buffer.from(response.data),
+      contentType: response.headers['content-type'] || 'image/png',
+    };
+  }
+
+  async function getInstanceFile(instanceId) {
+    const response = await client.request({
+      method: 'GET',
+      url: `/instances/${instanceId}/file`,
+      responseType: 'arraybuffer',
+      timeout: timeoutMs > 2500 ? timeoutMs : 30000,
+    });
+    return Buffer.from(response.data);
+  }
+
+  async function getStudyExpanded(studyId) {
+    return request('GET', `/studies/${studyId}?expand`);
+  }
+
+  async function listSeriesForStudy(studyId) {
+    const study = await getStudy(studyId);
+    const seriesIds = Array.isArray(study.Series) ? study.Series : [];
+    const series = await Promise.all(seriesIds.map((id) => getSeries(id).catch(() => null)));
+    return series.filter(Boolean).map((item) => ({
+      id: item.ID,
+      modality: item.MainDicomTags?.Modality ?? null,
+      description: item.MainDicomTags?.SeriesDescription ?? null,
+      seriesNumber: item.MainDicomTags?.SeriesNumber ?? null,
+      instances: Array.isArray(item.Instances) ? item.Instances : [],
+    }));
+  }
+
+  async function getInstanceSearchRows(limit = 150) {
+    const response = await findResources('Instance', {
+      Query: {},
+      Limit: limit,
+      OrderBy: [
+        {
+          Type: 'DicomTag',
+          Key: 'StudyDate',
+          Direction: 'DESC',
+        },
+      ],
+      RequestedTags: [
+        'PatientID',
+        'PatientName',
+        'StudyID',
+        'StudyDate',
+        'StudyDescription',
+        'StudyInstanceUID',
+        'SeriesDescription',
+        'SeriesInstanceUID',
+        'SeriesNumber',
+        'Modality',
+        'InstanceNumber',
+        'SliceThickness',
+        'KVP',
+        'XRayTubeCurrent',
+        'TubeCurrent',
+        'ReconstructionAlgorithm',
+        'ExposureIndex',
+        'TargetExposureIndex',
+        'DeviationIndex',
+      ],
+    });
+
+    return Array.isArray(response) ? response : [];
+  }
+
+  function buildStudyProfile(study, series, instance, instanceTags) {
+    const studyTags = study?.MainDicomTags || {};
+    const seriesTags = series?.MainDicomTags || {};
+    const tags = instanceTags || {};
+
+    return {
+      id: study?.ID ?? null,
+      patientId: normalizeValue(readTag(study, 'PatientID')),
+      patientName: normalizeValue(readTag(study, 'PatientName')),
+      studyId: normalizeValue(readTag(study, 'StudyID')),
+      studyDate: normalizeValue(readTag(study, 'StudyDate')),
+      studyDescription: normalizeValue(readTag(study, 'StudyDescription')),
+      studyInstanceUID: normalizeValue(readTag(study, 'StudyInstanceUID')),
+      modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
+      seriesCount: Array.isArray(study?.Series) ? study.Series.length : null,
+      primarySeries: {
+        id: series?.ID ?? null,
+        seriesDate: normalizeValue(seriesTags.SeriesDate),
+        seriesDescription: normalizeValue(seriesTags.SeriesDescription),
+        seriesNumber: normalizeValue(seriesTags.SeriesNumber),
+        modality: normalizeValue(seriesTags.Modality),
+        protocolName: normalizeValue(seriesTags.ProtocolName),
+      },
+      primaryInstance: {
+        id: instance?.ID ?? null,
+        instanceNumber: normalizeValue(tags.InstanceNumber),
+        sliceThickness: normalizeValue(tags.SliceThickness),
+        kvp: normalizeValue(tags.KVP),
+        tubeCurrent: normalizeValue(tags.XRayTubeCurrent ?? tags.TubeCurrent),
+        reconstructionAlgorithm: normalizeValue(tags.ReconstructionAlgorithm),
+        exposureIndex: normalizeValue(tags.ExposureIndex),
+        targetExposureIndex: normalizeValue(tags.TargetExposureIndex),
+        deviationIndex: normalizeValue(tags.DeviationIndex),
+      },
+      raw: {
+        study: studyTags,
+        series: seriesTags,
+        instanceTags: tags,
+      },
+    };
+  }
+
+  async function getHealth() {
+    try {
+      const system = await getSystem();
+      return {
+        connected: true,
+        status: 'Orthanc: Connected',
+        name: system?.Name ?? system?.name ?? 'Orthanc',
+        version: system?.Version ?? system?.version ?? null,
+      };
+    } catch {
+      return {
+        connected: false,
+        status: 'Orthanc: Not Connected',
+        name: null,
+        version: null,
+      };
+    }
+  }
+
+  async function getDashboardSummary() {
+    try {
+      const health = await getHealth();
+      if (!health.connected) {
+        return {
+          ...health,
+          studies: null,
+          series: null,
+          instances: null,
+          recentActivity: [],
+          message: 'Unable to retrieve Orthanc data.',
+        };
+      }
+
+      const [statistics, changes] = await Promise.all([getStatistics(), getChanges(6)]);
+      return {
+        ...health,
+        studies: statistics.CountStudies ?? statistics.Studies ?? null,
+        series: statistics.CountSeries ?? statistics.Series ?? null,
+        instances: statistics.CountInstances ?? statistics.Instances ?? null,
+        recentActivity: Array.isArray(changes?.Changes) ? changes.Changes.slice(0, 6).map(formatActivity) : [],
+        message: null,
+      };
+    } catch {
+      return {
+        connected: false,
+        status: 'Orthanc unavailable',
+        name: null,
+        version: null,
+        studies: null,
+        series: null,
+        instances: null,
+        recentActivity: [],
+        message: 'Unable to retrieve Orthanc data.',
+      };
+    }
+  }
+
+  async function listStudies({ limit = 50 } = {}) {
+    try {
+      const rows = await findResources('Study', {
+        Query: {},
+        Limit: Math.min(Math.max(Number(limit) || 50, 1), 200),
+        OrderBy: [
+          {
+            Type: 'DicomTag',
+            Key: 'StudyDate',
+            Direction: 'DESC',
+          },
+        ],
+        RequestedTags: ['PatientID', 'PatientName', 'StudyID', 'StudyDate', 'StudyDescription', 'StudyInstanceUID', 'ModalitiesInStudy'],
+      });
+
+      return rows.map((study) => ({
+        id: study.ID,
+        patientId: normalizeValue(readTag(study, 'PatientID')),
+        patientName: normalizeValue(readTag(study, 'PatientName')),
+        studyId: normalizeValue(readTag(study, 'StudyID')),
+        studyDate: normalizeValue(readTag(study, 'StudyDate')),
+        studyDescription: normalizeValue(readTag(study, 'StudyDescription')),
+        studyInstanceUID: normalizeValue(readTag(study, 'StudyInstanceUID')),
+        modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
+        seriesCount: Array.isArray(study.Series) ? study.Series.length : null,
+      }));
+    } catch {
+      try {
+        const ids = await request('GET', '/studies');
+        const limitedIds = Array.isArray(ids) ? ids.slice(0, Math.min(Math.max(Number(limit) || 50, 1), 200)) : [];
+        const studies = await Promise.all(limitedIds.map((studyId) => getStudy(studyId).catch(() => null)));
+
+        return studies.filter(Boolean).map((study) => ({
+          id: study.ID,
+          patientId: normalizeValue(readTag(study, 'PatientID')),
+          patientName: normalizeValue(readTag(study, 'PatientName')),
+          studyId: normalizeValue(readTag(study, 'StudyID')),
+          studyDate: normalizeValue(readTag(study, 'StudyDate')),
+          studyDescription: normalizeValue(readTag(study, 'StudyDescription')),
+          studyInstanceUID: normalizeValue(readTag(study, 'StudyInstanceUID')),
+          modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
+          seriesCount: Array.isArray(study.Series) ? study.Series.length : null,
+        }));
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  async function getExposureIndexRows({ limit = 150 } = {}) {
+    try {
+      const rows = await getInstanceSearchRows(limit);
+
+      return rows.map((instance) => ({
+        id: instance.ID,
+        studyId: normalizeValue(readTag(instance, 'StudyID')),
+        studyDate: normalizeValue(readTag(instance, 'StudyDate')),
+        studyDescription: normalizeValue(readTag(instance, 'StudyDescription')),
+        studyInstanceUID: normalizeValue(readTag(instance, 'StudyInstanceUID')),
+        patientId: normalizeValue(readTag(instance, 'PatientID')),
+        patientName: normalizeValue(readTag(instance, 'PatientName')),
+        modality: normalizeValue(readTag(instance, 'Modality')),
+        seriesId: instance.ParentSeries ?? null,
+        seriesDescription: normalizeValue(readTag(instance, 'SeriesDescription')),
+        seriesNumber: normalizeValue(readTag(instance, 'SeriesNumber')),
+        instanceNumber: normalizeValue(readTag(instance, 'InstanceNumber')),
+        exposureIndex: normalizeValue(readTag(instance, 'ExposureIndex')),
+        targetExposureIndex: normalizeValue(readTag(instance, 'TargetExposureIndex')),
+        deviationIndex: normalizeValue(readTag(instance, 'DeviationIndex')),
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  async function getStudyProfile(studyId) {
+    const study = await getStudy(studyId);
+    const seriesIds = Array.isArray(study.Series) ? study.Series : [];
+    const primarySeriesId = seriesIds[0] ?? null;
+
+    let series = null;
+    let instance = null;
+    let instanceTags = null;
+
+    if (primarySeriesId) {
+      series = await getSeries(primarySeriesId);
+      const instanceIds = Array.isArray(series?.Instances) ? series.Instances : [];
+      const primaryInstanceId = instanceIds[0] ?? null;
+
+      if (primaryInstanceId) {
+        instance = await getInstance(primaryInstanceId);
+        instanceTags = await getInstanceTags(primaryInstanceId);
+      }
+    }
+
+    return buildStudyProfile(study, series, instance, instanceTags);
+  }
+
+  async function compareStudies(leftStudyId, rightStudyId) {
+    const [left, right] = await Promise.all([getStudyProfile(leftStudyId), getStudyProfile(rightStudyId)]);
+    return { left, right };
+  }
+
+  async function getOrthancStatus() {
+    const health = await getHealth();
+    return health.connected
+      ? { connected: true, status: health.status, name: health.name, version: health.version }
+      : { connected: false, status: 'Orthanc unavailable', name: null, version: null };
+  }
+
+  async function getRecentActivity(limit = 6) {
+    try {
+      const changes = await getChanges(limit);
+      return Array.isArray(changes?.Changes) ? changes.Changes.slice(0, limit).map(formatActivity) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function getConnectionSummary() {
+    const health = await getHealth();
+    if (!health.connected) {
+      return {
+        studies: null,
+        series: null,
+        instances: null,
+      };
+    }
+
+    const statistics = await getStatistics();
+    return {
+      studies: statistics.CountStudies ?? statistics.Studies ?? null,
+      series: statistics.CountSeries ?? null,
+      instances: statistics.CountInstances ?? null,
+    };
+  }
+
+  return {
+    getHealth,
+    getDashboardSummary,
+    getSystem,
+    getStatistics,
+    getChanges,
+    listStudies,
+    getExposureIndexRows,
+    getStudyProfile,
+    getStudyExpanded,
+    listSeriesForStudy,
+    getInstancePreview,
+    getInstanceRendered,
+    getInstanceFile,
+    compareStudies,
+    getOrthancStatus,
+    getRecentActivity,
+    getConnectionSummary,
+  };
+}
+
+
+========================================
+FILE: client\src\App.jsx
+========================================
+import { Navigate, Route, Routes } from 'react-router-dom';
+import Layout from './components/Layout.jsx';
+import ProtectedRoute from './components/ProtectedRoute.jsx';
+import Login from './pages/Login.jsx';
+import Dashboard from './pages/Dashboard.jsx';
+import ExposureIndex from './pages/ExposureIndex.jsx';
+import CompareScans from './pages/CompareScans.jsx';
+import AuditLog from './pages/AuditLog.jsx';
+import AdminDashboard from './pages/admin/AdminDashboard.jsx';
+import UserManagement from './pages/admin/UserManagement.jsx';
+import ImagingSchedule from './pages/admin/ImagingSchedule.jsx';
+import Alerts from './pages/admin/Alerts.jsx';
+import ModalityMonitoring from './pages/admin/ModalityMonitoring.jsx';
+import SystemAdministration from './pages/admin/SystemAdministration.jsx';
+import AdminProfile from './pages/admin/AdminProfile.jsx';
+import AdminRoute from './components/AdminRoute.jsx';
+import PractitionerRoute from './components/PractitionerRoute.jsx';
+import { useAuth } from './context/AuthContext.jsx';
+import { homePathFor } from './utils/format.js';
+
+function HomeRedirect() {
+  const { isAuthenticated, ready, user } = useAuth();
+  if (!ready) {
+    return <div className="auth-loading">Loading OrthoView+...</div>;
+  }
+  return <Navigate to={isAuthenticated ? homePathFor(user?.role) : '/login'} replace />;
+}
+
+const practitionerPages = [
+  ['/dashboard', <Dashboard />],
+  ['/exposure-index', <ExposureIndex />],
+  ['/compare-scans', <CompareScans />],
+];
+
+const adminPages = [
+  ['/admin/dashboard', <AdminDashboard />],
+  ['/admin/users', <UserManagement />],
+  ['/admin/schedule', <ImagingSchedule />],
+  ['/admin/alerts', <Alerts />],
+  ['/admin/audit-logs', <AuditLog />],
+  ['/admin/modalities', <ModalityMonitoring />],
+  ['/admin/system', <SystemAdministration />],
+  ['/admin/profile', <AdminProfile />],
+];
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<HomeRedirect />} />
+      <Route path="/login" element={<Login />} />
+      <Route
+        element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }
+      >
+        {practitionerPages.map(([path, element]) => (
+          <Route key={path} path={path} element={<PractitionerRoute>{element}</PractitionerRoute>} />
+        ))}
+        {adminPages.map(([path, element]) => (
+          <Route key={path} path={path} element={<AdminRoute>{element}</AdminRoute>} />
+        ))}
+        <Route path="/audit-log" element={<Navigate to="/admin/audit-logs" replace />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+
+========================================
+FILE: client\src\main.jsx
+========================================
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import App from './App.jsx';
+import { AuthProvider } from './context/AuthContext.jsx';
+import './styles/workstation.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <BrowserRouter>
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  </BrowserRouter>,
+);

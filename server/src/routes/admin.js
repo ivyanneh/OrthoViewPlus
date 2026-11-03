@@ -16,6 +16,9 @@ function handle(fn) {
     try {
       await fn(req, res);
     } catch (error) {
+      if (error.status) {
+        return res.status(error.status).json({ error: error.message });
+      }
       if (error instanceof UserError || error instanceof ScheduleError) {
         return res.status(error.status).json({ error: error.message });
       }
@@ -35,7 +38,9 @@ function shiftDate(date, days) {
 }
 
 function roleLabel(role) {
-  return role === 'administrator' ? 'Administrator' : 'Healthcare Practitioner';
+  if (role === 'administrator') return 'Administrator';
+  if (role === 'radiologist') return 'Radiologist';
+  return 'Practitioner';
 }
 
 function splitModalities(value) {
@@ -45,7 +50,7 @@ function splitModalities(value) {
     .filter(Boolean);
 }
 
-export function createAdminRouter({ db, audit, users, schedule, alerts, orthanc }) {
+export function createAdminRouter({ db, audit, users, patients, schedule, alerts, orthanc, patientMappings }) {
   const router = Router();
 
   function log(req, action, target, description) {
@@ -76,6 +81,103 @@ export function createAdminRouter({ db, audit, users, schedule, alerts, orthanc 
         auditCategories: Object.keys(AUDIT_CATEGORIES),
         minPasswordLength: MIN_PASSWORD_LENGTH,
       });
+    }),
+  );
+
+  router.get(
+    '/patients',
+    handle((req, res) => {
+      const status = req.query.status || 'all';
+      const query = String(req.query.q || '').trim();
+      const patientList = patients.search({ query, status, limit: req.query.limit });
+      log(req, 'admin_patient_list', 'patient_management', 'searched or listed patient records.');
+      res.json({ patients: patientList });
+    }),
+  );
+
+  router.get(
+    '/patients/:id',
+    handle((req, res) => {
+      const patient = patients.requirePatient(req.params.id);
+      log(req, 'admin_patient_view', `patient:${patient.id}`, `viewed patient ${patient.mrn}.`);
+      res.json({ patient });
+    }),
+  );
+
+  router.post(
+    '/patients',
+    handle((req, res) => {
+      const patient = patients.create({ ...(req.body || {}), createdBy: req.user.id });
+      log(req, 'admin_patient_create', `patient:${patient.id}`, `registered patient ${patient.mrn}.`);
+      res.status(201).json({ patient });
+    }),
+  );
+
+  router.patch(
+    '/patients/:id',
+    handle((req, res) => {
+      const patient = patients.update(req.params.id, req.body || {});
+      log(req, 'admin_patient_update', `patient:${patient.id}`, `updated patient ${patient.mrn}.`);
+      res.json({ patient });
+    }),
+  );
+
+  router.patch(
+    '/patients/:id/status',
+    handle((req, res) => {
+      const status = String(req.body?.status || '');
+      const patient = patients.setStatus(req.params.id, status);
+      const action = status === 'archived' ? 'admin_patient_archive' : 'admin_patient_activate';
+      const verb = status === 'archived' ? 'archived' : 'activated';
+      log(req, action, `patient:${patient.id}`, `${verb} patient ${patient.mrn}.`);
+      res.json({ patient });
+    }),
+  );
+
+  router.get(
+    '/patient-mappings',
+    handle((req, res) => {
+      res.json({ mappings: patientMappings.list({ status: req.query.status || 'all', limit: 500 }) });
+    }),
+  );
+
+  router.post(
+    '/patient-mappings',
+    handle(async (req, res) => {
+      const orthancPatientId = String(req.body?.orthancPatientId || '').trim();
+      if (!orthancPatientId) {
+        return res.status(400).json({ error: 'orthancPatientId is required.' });
+      }
+      const studies = await orthanc.listStudies({ limit: 200 });
+      if (!studies.some((study) => String(study.patientId).toLowerCase() === orthancPatientId.toLowerCase())) {
+        return res.status(404).json({ error: 'PatientID is not present in the available Orthanc studies.' });
+      }
+      const mapping = patientMappings.create({
+        patientId: req.body?.patientId,
+        orthancPatientId,
+        verifiedBy: req.user.id,
+        notes: req.body?.notes,
+      });
+      log(req, 'patient_mapping_create', `patient_mapping:${mapping.id}`, `created a DICOM patient mapping.`);
+      res.status(201).json({ mapping });
+    }),
+  );
+
+  router.post(
+    '/patient-mappings/:id/verify',
+    handle((req, res) => {
+      const mapping = patientMappings.verify(req.params.id, req.user.id);
+      log(req, 'patient_mapping_verify', `patient_mapping:${mapping.id}`, 'verified a DICOM patient mapping.');
+      res.json({ mapping });
+    }),
+  );
+
+  router.post(
+    '/patient-mappings/:id/reject',
+    handle((req, res) => {
+      const mapping = patientMappings.reject(req.params.id, req.user.id, req.body?.notes);
+      log(req, 'patient_mapping_reject', `patient_mapping:${mapping.id}`, 'rejected a DICOM patient mapping.');
+      res.json({ mapping });
     }),
   );
 

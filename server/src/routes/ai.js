@@ -1,0 +1,228 @@
+import { Router } from 'express';
+import { AppError, handleRoute } from '../utils/http.js';
+import { resolveResultFile } from '../services/aiClient.js';
+
+export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patientMappings, resultsDirectory }) {
+  const router = Router();
+
+  function resolveStoredResult(storedPath, message) {
+    try {
+      const filePath = resolveResultFile(resultsDirectory, storedPath);
+      if (!filePath) throw new AppError(message, 404);
+      return filePath;
+    } catch (error) {
+      if (error.code === 'ENOENT') throw new AppError(message, 404);
+      throw error;
+    }
+  }
+
+  function assertJobAccess(req, job) {
+    if (!job) throw new AppError('AI job not found.', 404);
+    if (req.user.role === 'administrator') return;
+    if (job.capability === 'synthetic' && !job.sourceStudyId && !job.patientId) {
+      if (Number(job.requestedBy) !== Number(req.user.id)) {
+        throw new AppError('You do not have permission to access this synthetic AI job.', 403);
+      }
+      return;
+    }
+    const study = job.sourceStudyId ? studies.get(job.sourceStudyId) : null;
+    if (
+      !study ||
+      Number(study.patientId) !== Number(job.patientId) ||
+      !studies.isInternalStudyAssignedToRadiologist(job.sourceStudyId, req.user.id)
+    ) {
+      throw new AppError('You may only access AI jobs for studies assigned to you.', 403);
+    }
+  }
+
+  function canAccessJob(req, job) {
+    if (req.user.role === 'administrator') return true;
+    if (job.capability === 'synthetic' && !job.sourceStudyId && !job.patientId) {
+      return Number(job.requestedBy) === Number(req.user.id);
+    }
+    const study = job.sourceStudyId ? studies.get(job.sourceStudyId) : null;
+    return Boolean(
+      study &&
+      Number(study.patientId) === Number(job.patientId) &&
+      studies.isInternalStudyAssignedToRadiologist(job.sourceStudyId, req.user.id)
+    );
+  }
+
+  async function getInstanceStudy(instanceId) {
+    const instance = await orthanc.getInstance(instanceId);
+    if (!instance?.ParentStudy) throw new AppError('Unable to resolve the instance study.', 404);
+    const tags = await orthanc.getInstanceTags(instanceId);
+    const patientId = tags?.PatientID ?? tags?.patientId ?? null;
+    if (!patientId) throw new AppError('Unable to determine DICOM PatientID for this study.', 400);
+    return { orthancStudyId: String(instance.ParentStudy), patientId: String(patientId) };
+  }
+
+  async function getSeriesStudy(seriesId) {
+    const series = await orthanc.getSeries(seriesId);
+    const instances = Array.isArray(series?.Instances) ? series.Instances : [];
+    if (!instances.length) throw new AppError('The selected series contains no instances.', 400);
+    const firstInstance = await getInstanceStudy(instances[0]);
+    if (series.ParentStudy && String(series.ParentStudy) !== firstInstance.orthancStudyId) {
+      throw new AppError('The selected series does not belong to its reported study.', 409);
+    }
+    return { ...firstInstance, instances };
+  }
+
+  function assertAssignment(req, study) {
+    if (req.user.role === 'administrator') return;
+    if (
+      req.user.role !== 'radiologist' ||
+      !studies.isAssignedToRadiologist(study.orthancStudyId, req.user.id)
+    ) {
+      throw new AppError('You may only process studies assigned to you.', 403);
+    }
+  }
+
+  router.get('/capabilities', handleRoute((_req, res) => {
+    res.json({ capabilities: Object.entries(aiClient.capabilities).map(([key, value]) => ({ key, ...value })) });
+  }));
+
+  router.get('/health', handleRoute(async (_req, res) => {
+    res.json(await aiClient.health());
+  }));
+
+  router.get('/jobs', handleRoute((req, res) => {
+    const jobs = aiJobs.list({ limit: req.query.limit }).filter((job) => canAccessJob(req, job));
+    res.json({ jobs });
+  }));
+
+  router.get('/jobs/:id', handleRoute((req, res) => {
+    const job = aiJobs.getJob(req.params.id);
+    assertJobAccess(req, job);
+    res.json({ job });
+  }));
+
+  router.post('/jobs', handleRoute(async (req, res) => {
+    const capability = String(req.body?.capability || '').trim();
+    const instanceId = req.body?.instanceId ? String(req.body.instanceId) : null;
+    const priorInstanceId = req.body?.priorInstanceId ? String(req.body.priorInstanceId) : null;
+    const seriesId = req.body?.seriesId ? String(req.body.seriesId) : null;
+    const examType = req.body?.examType;
+    const bodyPart = req.body?.bodyPart;
+    const notes = req.body?.notes;
+    const input = { instanceId, priorInstanceId, seriesId, examType, bodyPart, notes };
+
+    await aiJobs.validateInputSize(input);
+
+    if (capability === 'synthetic') {
+      if (instanceId || seriesId || priorInstanceId) {
+        throw new AppError('Synthetic generation does not accept patient study or image inputs.', 400);
+      }
+      const job = aiJobs.enqueue({
+        capability,
+        requestedBy: req.user.id,
+        patientId: null,
+        sourceStudyId: null,
+        input,
+        auditUser: req.user.id,
+      });
+      res.status(201).json({ job });
+      return;
+    }
+
+    if (['compare', 'reconstruct'].includes(capability) && !priorInstanceId) {
+      throw new AppError('Select an authorized prior study for this capability.', 400);
+    }
+    if (capability === 'segment3d' && !seriesId) {
+      throw new AppError('Select a series for 3D visualization.', 400);
+    }
+    if (!['segment3d'].includes(capability) && !instanceId) {
+      throw new AppError('Select a source image instance for this capability.', 400);
+    }
+
+    const sourceStudyId = Number(req.body?.sourceStudyId);
+    if (!Number.isSafeInteger(sourceStudyId) || sourceStudyId <= 0) {
+      throw new AppError('A valid sourceStudyId is required.', 400);
+    }
+    if (!instanceId && !seriesId) {
+      throw new AppError('An Orthanc instance or series is required for this capability.', 400);
+    }
+
+    const sourceStudy = studies.get(sourceStudyId);
+    if (!sourceStudy?.orthancStudyId || !sourceStudy.patientId) {
+      throw new AppError('The selected source study is not linked to a patient.', 404);
+    }
+    assertAssignment(req, sourceStudy);
+
+    const selected = instanceId
+      ? await getInstanceStudy(instanceId)
+      : await getSeriesStudy(seriesId);
+    if (instanceId && seriesId) {
+      const selectedSeries = await getSeriesStudy(seriesId);
+      if (selected.orthancStudyId !== selectedSeries.orthancStudyId) {
+        throw new AppError('The selected instance and series belong to different studies.', 409);
+      }
+    }
+    if (String(sourceStudy.orthancStudyId) !== selected.orthancStudyId) {
+      throw new AppError('sourceStudyId does not match the selected instance or series.', 409);
+    }
+
+    const mapping = patientMappings.getVerifiedMapping(selected.patientId);
+    if (!mapping || Number(mapping.patientId) !== Number(sourceStudy.patientId)) {
+      throw new AppError('Study patient is not verified for the selected source study.', 409);
+    }
+
+    if (priorInstanceId) {
+      const priorStudy = await getInstanceStudy(priorInstanceId);
+      if (priorStudy.orthancStudyId === selected.orthancStudyId) {
+        throw new AppError('Select a prior instance from a different authorized study.', 409);
+      }
+      if (priorStudy.patientId.toLowerCase() !== selected.patientId.toLowerCase()) {
+        throw new AppError('The prior instance belongs to a different DICOM patient.', 409);
+      }
+      const linkedPriorStudy = studies.getByOrthancStudyId(priorStudy.orthancStudyId);
+      if (
+        !linkedPriorStudy ||
+        Number(linkedPriorStudy.patientId) !== Number(mapping.patientId) ||
+        (req.user.role !== 'administrator' &&
+          !studies.isAssignedToRadiologist(priorStudy.orthancStudyId, req.user.id))
+      ) {
+        throw new AppError('The prior instance is not from a permitted study for this patient.', 403);
+      }
+    }
+
+    const job = aiJobs.enqueue({
+      capability,
+      requestedBy: req.user.id,
+      patientId: mapping.patientId,
+      sourceStudyId,
+      input,
+      auditUser: req.user.id,
+    });
+    res.status(201).json({ job });
+  }));
+
+  router.get('/results/:id/file', handleRoute((req, res) => {
+    const result = aiJobs.getResult(req.params.id);
+    if (!result) throw new AppError('AI result not found.', 404);
+    assertJobAccess(req, aiJobs.getJob(result.jobId));
+    res.sendFile(resolveStoredResult(result.filePath, 'Result file not found.'));
+  }));
+
+  router.get('/results/:id/overlay', handleRoute((req, res) => {
+    const result = aiJobs.getResult(req.params.id);
+    if (!result) throw new AppError('AI result not found.', 404);
+    assertJobAccess(req, aiJobs.getJob(result.jobId));
+    res.sendFile(resolveStoredResult(result.overlayPath, 'Overlay file not found.'));
+  }));
+
+  router.post('/results/:id/review', handleRoute((req, res) => {
+    const result = aiJobs.getResult(req.params.id);
+    if (!result) throw new AppError('AI result not found.', 404);
+    assertJobAccess(req, aiJobs.getJob(result.jobId));
+    res.json({ result: aiJobs.markReviewed(req.params.id, req.user.id) });
+  }));
+
+  router.post('/jobs/:id/retry', handleRoute((req, res) => {
+    const job = aiJobs.getJob(req.params.id);
+    assertJobAccess(req, job);
+    res.json({ job: aiJobs.retry(req.params.id, req.user.id) });
+  }));
+
+  return router;
+}

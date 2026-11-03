@@ -1,0 +1,2572 @@
+ORTHOVIEW+ SUPPLEMENTARY CODE AUDIT
+
+
+========================================
+FILE: server\src\services\aiJobs.js
+========================================
+import fs from 'node:fs';
+import path from 'node:path';
+import { AppError } from '../utils/http.js';
+import { writeResultFile } from './aiClient.js';
+
+const SELECT_JOB = `
+  SELECT j.id, j.capability, j.status, j.requested_by AS requestedBy, j.patient_id AS patientId,
+         j.source_study_id AS sourceStudyId, j.orthanc_instance_id AS orthancInstanceId,
+         j.input_json AS inputJson, j.error, j.created_at AS createdAt, j.started_at AS startedAt,
+         j.completed_at AS completedAt
+  FROM ai_jobs j
+`;
+
+const SELECT_RESULT = `
+  SELECT id, job_id AS jobId, capability, source_study_id AS sourceStudyId, result_kind AS resultKind,
+         file_path AS filePath, overlay_path AS overlayPath, metadata_json AS metadataJson,
+         label, review_status AS reviewStatus, created_at AS createdAt
+  FROM ai_results
+`;
+
+export function createAiJobService(db, { aiClient, orthanc, resultsDirectory, audit }) {
+  function getJob(id) {
+    const job = db.prepare(`${SELECT_JOB} WHERE j.id = ?`).get(Number(id));
+    if (!job) {
+      return null;
+    }
+    return {
+      ...job,
+      input: job.inputJson ? JSON.parse(job.inputJson) : null,
+      results: db.prepare(`${SELECT_RESULT} WHERE job_id = ?`).all(job.id).map(publicResult),
+    };
+  }
+
+  function publicResult(row) {
+    return {
+      ...row,
+      metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
+      fileUrl: row.filePath ? `/api/ai/results/${row.id}/file` : null,
+      overlayUrl: row.overlayPath ? `/api/ai/results/${row.id}/overlay` : null,
+    };
+  }
+
+  async function collectFiles({ instanceId, priorInstanceId, seriesId }) {
+    const files = [];
+    if (instanceId) {
+      const buffer = await orthanc.getInstanceFile(instanceId);
+      files.push({ field: 'image', buffer, filename: `${instanceId}.dcm`, contentType: 'application/dicom' });
+    }
+    if (priorInstanceId) {
+      const buffer = await orthanc.getInstanceFile(priorInstanceId);
+      files.push({ field: 'prior_image', buffer, filename: `${priorInstanceId}.dcm`, contentType: 'application/dicom' });
+    }
+    if (seriesId) {
+      const series = await orthanc.getSeries(seriesId);
+      const instanceIds = Array.isArray(series.Instances) ? series.Instances.slice(0, 80) : [];
+      for (const id of instanceIds) {
+        const buffer = await orthanc.getInstanceFile(id);
+        files.push({ field: 'volume', buffer, filename: `${id}.dcm`, contentType: 'application/dicom' });
+      }
+    }
+    return files;
+  }
+
+  async function runJob(jobId) {
+    const jobRow = db.prepare('SELECT * FROM ai_jobs WHERE id = ?').get(jobId);
+    if (!jobRow) {
+      return;
+    }
+    db.prepare(`UPDATE ai_jobs SET status = 'running', started_at = datetime('now') WHERE id = ?`).run(jobId);
+    const input = jobRow.input_json ? JSON.parse(jobRow.input_json) : {};
+    try {
+      const files = jobRow.capability === 'synthetic' ? [] : await collectFiles(input);
+      const output = await aiClient.process({
+        capability: jobRow.capability,
+        files,
+        fields: {
+          exam_type: input.examType || '',
+          patient_id: input.patientId || '',
+          prior_patient_id: input.priorPatientId || '',
+          body_part: input.bodyPart || '',
+          notes: input.notes || '',
+        },
+      });
+
+      const saved = [];
+      if (output.image_base64) {
+        saved.push(
+          writeResultFile(resultsDirectory, `job-${jobId}-primary.png`, output.image_base64),
+        );
+      }
+      if (output.overlay_base64) {
+        saved.push(
+          writeResultFile(resultsDirectory, `job-${jobId}-overlay.png`, output.overlay_base64),
+        );
+      }
+      if (output.mesh) {
+        const meshPath = path.join(resultsDirectory, `job-${jobId}-mesh.json`);
+        fs.mkdirSync(resultsDirectory, { recursive: true });
+        fs.writeFileSync(meshPath, JSON.stringify(output.mesh));
+        saved.unshift(meshPath);
+      }
+
+      db.prepare(
+        `INSERT INTO ai_results (job_id, capability, source_study_id, result_kind, file_path, overlay_path, metadata_json, label)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        jobId,
+        jobRow.capability,
+        jobRow.source_study_id,
+        output.result_kind || jobRow.capability,
+        saved[0] || null,
+        output.overlay_base64 ? path.join(resultsDirectory, `job-${jobId}-overlay.png`) : null,
+        JSON.stringify({
+          method: output.method,
+          licence: output.licence,
+          warnings: output.warnings || [],
+          metrics: output.metrics || {},
+          experimental: Boolean(output.experimental),
+          synthetic: Boolean(output.synthetic),
+          meshIncluded: Boolean(output.mesh),
+        }),
+        output.displayLabel || output.label,
+      );
+
+      db.prepare(`UPDATE ai_jobs SET status = 'completed', completed_at = datetime('now'), error = NULL WHERE id = ?`).run(jobId);
+      audit?.log({
+        userId: jobRow.requested_by,
+        action: 'ai_job_completed',
+        target: `ai_job:${jobId}`,
+        description: `AI job ${jobId} (${jobRow.capability}) completed.`,
+      });
+    } catch (error) {
+      db.prepare(`UPDATE ai_jobs SET status = 'failed', completed_at = datetime('now'), error = ? WHERE id = ?`).run(
+        error.message || 'AI processing failed.',
+        jobId,
+      );
+      audit?.log({
+        userId: jobRow.requested_by,
+        action: 'ai_job_failed',
+        target: `ai_job:${jobId}`,
+        description: `AI job ${jobId} failed: ${error.message}`,
+      });
+    }
+  }
+
+  return {
+    getJob,
+
+    list({ requestedBy, limit = 50 } = {}) {
+      const rows = db
+        .prepare(`${SELECT_JOB} WHERE j.requested_by = @requestedBy ORDER BY j.created_at DESC LIMIT @limit`)
+        .all({ requestedBy: Number(requestedBy), limit: Math.min(Number(limit) || 50, 200) });
+      return rows.map((job) => ({
+        ...job,
+        input: job.inputJson ? JSON.parse(job.inputJson) : null,
+      }));
+    },
+
+    getResult(id) {
+      const row = db.prepare(`${SELECT_RESULT} WHERE id = ?`).get(Number(id));
+      return row ? publicResult(row) : null;
+    },
+
+    markReviewed(id, userId) {
+      const result = this.getResult(id);
+      if (!result) {
+        throw new AppError('AI result not found.', 404);
+      }
+      db.prepare(`UPDATE ai_results SET review_status = 'reviewed' WHERE id = ?`).run(Number(id));
+      audit?.log({
+        userId,
+        action: 'ai_result_reviewed',
+        target: `ai_result:${id}`,
+        description: `Radiologist reviewed AI result ${id}.`,
+      });
+      return this.getResult(id);
+    },
+
+    enqueue({ capability, requestedBy, patientId, sourceStudyId, input, auditUser }) {
+      if (!aiClient.capabilities[capability]) {
+        throw new AppError('Unsupported AI capability.');
+      }
+      if (capability !== 'synthetic' && !input?.instanceId && !input?.seriesId) {
+        throw new AppError('An Orthanc instance or series is required for this capability.');
+      }
+      const result = db
+        .prepare(
+          `INSERT INTO ai_jobs (capability, requested_by, patient_id, source_study_id, orthanc_instance_id, input_json)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          capability,
+          requestedBy,
+          patientId ?? null,
+          sourceStudyId ?? null,
+          input?.instanceId ?? null,
+          JSON.stringify(input || {}),
+        );
+      audit?.log({
+        userId: auditUser,
+        action: 'ai_job_queued',
+        target: `ai_job:${result.lastInsertRowid}`,
+        description: `Queued AI capability "${capability}".`,
+      });
+      setImmediate(() => {
+        runJob(result.lastInsertRowid).catch((error) => {
+          console.error('AI job failed', error);
+        });
+      });
+      return getJob(result.lastInsertRowid);
+    },
+  };
+}
+
+
+========================================
+FILE: server\src\services\aiClient.js
+========================================
+import fs from 'node:fs';
+import path from 'node:path';
+import axios from 'axios';
+import FormData from 'form-data';
+import { AppError } from '../utils/http.js';
+
+const CAPABILITIES = {
+  restore: { endpoint: '/api/ai/restore', label: 'AI-restored image — not a substitute for the original acquisition' },
+  completeness: { endpoint: '/api/ai/completeness-check', label: 'Coverage assessment — assistive, requires review' },
+  compare: { endpoint: '/api/ai/compare', label: 'Longitudinal comparison — aligned difference map' },
+  reconstruct: { endpoint: '/api/ai/reconstruct', label: 'Estimated reconstruction — generated regions, not exact recovery' },
+  segment3d: { endpoint: '/api/ai/segment-3d', label: '3D visualisation derived from CT volume — experimental where noted' },
+  synthetic: { endpoint: '/api/ai/generate-synthetic', label: 'SYNTHETIC image — not a patient examination' },
+  complementary: { endpoint: '/api/ai/generate-complementary-view', label: 'SYNTHETIC complementary view — estimated, not acquired' },
+};
+
+export function createAiClient({ baseUrl, timeoutMs = 120000 }) {
+  const client = axios.create({
+    baseURL: String(baseUrl || '').replace(/\/$/, ''),
+    timeout: timeoutMs,
+    validateStatus: (status) => status >= 200 && status < 500,
+  });
+
+  return {
+    capabilities: CAPABILITIES,
+
+    async health() {
+      try {
+        const response = await client.get('/health');
+        return { available: response.status === 200, ...response.data };
+      } catch {
+        return { available: false, status: 'AI service unavailable' };
+      }
+    },
+
+    async process({ capability, files, fields }) {
+      const spec = CAPABILITIES[capability];
+      if (!spec) {
+        throw new AppError('Unsupported AI capability.');
+      }
+      const form = new FormData();
+      for (const [key, value] of Object.entries(fields || {})) {
+        if (value !== undefined && value !== null) {
+          form.append(key, typeof value === 'string' ? value : JSON.stringify(value));
+        }
+      }
+      for (const file of files || []) {
+        form.append(file.field, file.buffer, { filename: file.filename, contentType: file.contentType || 'application/octet-stream' });
+      }
+      try {
+        const response = await client.post(spec.endpoint, form, {
+          headers: form.getHeaders(),
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+        });
+        if (response.status >= 400) {
+          throw new AppError(response.data?.detail || response.data?.error || 'AI processing failed.', response.status);
+        }
+        return { ...response.data, displayLabel: spec.label };
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
+        }
+        if (!error.response) {
+          throw new AppError('The AI processing service is not available.', 503);
+        }
+        throw new AppError(error.response.data?.detail || error.response.data?.error || 'AI processing failed.', 502);
+      }
+    },
+  };
+}
+
+export function writeResultFile(directory, filename, base64Data) {
+  fs.mkdirSync(directory, { recursive: true });
+  const filePath = path.join(directory, filename);
+  fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+  return filePath;
+}
+
+
+========================================
+FILE: server\src\services\patients.js
+========================================
+import { AppError, cleanText } from '../utils/http.js';
+
+const SELECT = `
+  SELECT p.id, p.mrn, p.first_name AS firstName, p.last_name AS lastName,
+         p.date_of_birth AS dateOfBirth, p.sex, p.notes, p.status,
+         p.created_at AS createdAt, p.updated_at AS updatedAt,
+         creator.username AS createdBy
+  FROM patients p
+  LEFT JOIN users creator ON creator.id = p.created_by
+`;
+
+export function createPatientService(db) {
+  const getById = db.prepare(`${SELECT} WHERE p.id = ?`);
+
+  function get(id) {
+    return getById.get(Number(id)) ?? null;
+  }
+
+  function requirePatient(id) {
+    const patient = get(id);
+    if (!patient) {
+      throw new AppError('Patient not found.', 404);
+    }
+    return patient;
+  }
+
+  return {
+    get,
+    requirePatient,
+
+    search({ query = '', status = 'active', limit = 50 } = {}) {
+      const clauses = [];
+      const params = { limit: Math.min(Math.max(Number(limit) || 50, 1), 200) };
+      if (status && status !== 'all') {
+        clauses.push('p.status = @status');
+        params.status = status;
+      }
+      if (query) {
+        clauses.push(`(
+          LOWER(p.mrn) LIKE @query OR
+          LOWER(p.first_name) LIKE @query OR
+          LOWER(p.last_name) LIKE @query OR
+          LOWER(p.first_name || ' ' || p.last_name) LIKE @query
+        )`);
+        params.query = `%${String(query).toLowerCase()}%`;
+      }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      return db
+        .prepare(`${SELECT} ${where} ORDER BY p.last_name COLLATE NOCASE, p.first_name COLLATE NOCASE LIMIT @limit`)
+        .all(params);
+    },
+
+    create({ mrn, firstName, lastName, dateOfBirth, sex, notes, createdBy }) {
+      const record = {
+        mrn: cleanText(mrn, 40),
+        firstName: cleanText(firstName, 80),
+        lastName: cleanText(lastName, 80),
+        dateOfBirth: cleanText(dateOfBirth, 10) ?? null,
+        sex: cleanText(sex, 20) ?? null,
+        notes: cleanText(notes, 500) ?? null,
+      };
+      if (!record.mrn || !record.firstName || !record.lastName) {
+        throw new AppError('MRN, first name and last name are required.');
+      }
+      if (db.prepare('SELECT id FROM patients WHERE mrn = ?').get(record.mrn)) {
+        throw new AppError('A patient with that MRN already exists.', 409);
+      }
+      const result = db
+        .prepare(
+          `INSERT INTO patients (mrn, first_name, last_name, date_of_birth, sex, notes, created_by, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        )
+        .run(record.mrn, record.firstName, record.lastName, record.dateOfBirth, record.sex, record.notes, createdBy ?? null);
+      return get(result.lastInsertRowid);
+    },
+
+    update(id, changes) {
+      const patient = requirePatient(id);
+      if (patient.status === 'archived') {
+        throw new AppError('Archived patient records cannot be edited.', 409);
+      }
+      const next = {
+        firstName: changes.firstName !== undefined ? cleanText(changes.firstName, 80) : patient.firstName,
+        lastName: changes.lastName !== undefined ? cleanText(changes.lastName, 80) : patient.lastName,
+        dateOfBirth: changes.dateOfBirth !== undefined ? cleanText(changes.dateOfBirth, 10) : patient.dateOfBirth,
+        sex: changes.sex !== undefined ? cleanText(changes.sex, 20) : patient.sex,
+        notes: changes.notes !== undefined ? cleanText(changes.notes, 500) : patient.notes,
+      };
+      if (!next.firstName || !next.lastName) {
+        throw new AppError('First name and last name are required.');
+      }
+      db.prepare(
+        `UPDATE patients SET first_name = ?, last_name = ?, date_of_birth = ?, sex = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`,
+      ).run(next.firstName, next.lastName, next.dateOfBirth, next.sex, next.notes, patient.id);
+      return get(patient.id);
+    },
+
+    archive(id) {
+      const patient = requirePatient(id);
+      db.prepare(`UPDATE patients SET status = 'archived', updated_at = datetime('now') WHERE id = ?`).run(patient.id);
+      return get(patient.id);
+    },
+
+    count() {
+      return db.prepare(`SELECT COUNT(*) AS total FROM patients WHERE status = 'active'`).get().total;
+    },
+  };
+}
+
+
+========================================
+FILE: server\src\services\requests.js
+========================================
+import { AppError, cleanText } from '../utils/http.js';
+
+const SELECT = `
+  SELECT r.id, r.patient_id AS patientId, r.appointment_id AS appointmentId,
+         r.requested_by AS requestedBy, r.assigned_radiologist_id AS assignedRadiologistId,
+         r.examination, r.modality, r.priority, r.clinical_indication AS clinicalIndication,
+         r.status, r.created_at AS createdAt, r.updated_at AS updatedAt,
+         p.mrn, p.first_name AS firstName, p.last_name AS lastName,
+         requester.username AS requestedByUsername,
+         COALESCE(radiologist.full_name, radiologist.username) AS assignedRadiologist
+  FROM imaging_requests r
+  JOIN patients p ON p.id = r.patient_id
+  LEFT JOIN users requester ON requester.id = r.requested_by
+  LEFT JOIN users radiologist ON radiologist.id = r.assigned_radiologist_id
+`;
+
+export function createRequestService(db, { notifications } = {}) {
+  const getById = db.prepare(`${SELECT} WHERE r.id = ?`);
+
+  function get(id) {
+    return getById.get(Number(id)) ?? null;
+  }
+
+  function list({ status, patientId, assignedRadiologistId, requestedBy, limit = 200 } = {}) {
+    const clauses = [];
+    const params = { limit: Math.min(Math.max(Number(limit) || 200, 1), 500) };
+    if (status && status !== 'all') {
+      clauses.push('r.status = @status');
+      params.status = status;
+    }
+    if (patientId) {
+      clauses.push('r.patient_id = @patientId');
+      params.patientId = Number(patientId);
+    }
+    if (assignedRadiologistId) {
+      clauses.push('(r.assigned_radiologist_id = @assignedRadiologistId OR r.assigned_radiologist_id IS NULL)');
+      params.assignedRadiologistId = Number(assignedRadiologistId);
+    }
+    if (requestedBy) {
+      clauses.push('r.requested_by = @requestedBy');
+      params.requestedBy = Number(requestedBy);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return db.prepare(`${SELECT} ${where} ORDER BY r.created_at DESC, r.id DESC LIMIT @limit`).all(params);
+  }
+
+  return {
+    get,
+    list,
+
+    create({ patientId, requestedBy, appointmentId, examination, modality, priority = 'routine', clinicalIndication, assignedRadiologistId }) {
+      const patient = db.prepare('SELECT id, first_name, last_name FROM patients WHERE id = ? AND status = ?').get(Number(patientId), 'active');
+      if (!patient) {
+        throw new AppError('Patient not found or archived.', 404);
+      }
+      const exam = cleanText(examination, 120);
+      const mod = String(modality || '').trim().toUpperCase();
+      if (!exam || !mod) {
+        throw new AppError('Examination and modality are required.');
+      }
+      if (!['routine', 'urgent'].includes(priority)) {
+        throw new AppError('Priority must be routine or urgent.');
+      }
+      const result = db
+        .prepare(
+          `INSERT INTO imaging_requests (
+             patient_id, appointment_id, requested_by, assigned_radiologist_id,
+             examination, modality, priority, clinical_indication, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        )
+        .run(
+          patient.id,
+          appointmentId ? Number(appointmentId) : null,
+          requestedBy,
+          assignedRadiologistId ? Number(assignedRadiologistId) : null,
+          exam,
+          mod,
+          priority,
+          cleanText(clinicalIndication, 500) ?? null,
+        );
+
+      notifications?.notifyRole('radiologist', {
+        type: 'imaging_request',
+        title: 'New imaging request',
+        message: `${patient.first_name} ${patient.last_name}: ${exam} (${mod}).`,
+        resourceType: 'imaging_request',
+        resourceId: result.lastInsertRowid,
+      });
+
+      return get(result.lastInsertRowid);
+    },
+
+    setStatus(id, status) {
+      const request = get(Number(id));
+      if (!request) {
+        throw new AppError('Imaging request not found.', 404);
+      }
+      const allowed = ['submitted', 'scheduled', 'in_progress', 'completed', 'cancelled'];
+      if (!allowed.includes(status)) {
+        throw new AppError('Invalid imaging request status.');
+      }
+      db.prepare(`UPDATE imaging_requests SET status = ?, updated_at = datetime('now') WHERE id = ?`).run(status, request.id);
+      return get(request.id);
+    },
+
+    assign(id, radiologistId) {
+      const request = get(Number(id));
+      if (!request) {
+        throw new AppError('Imaging request not found.', 404);
+      }
+      db.prepare(
+        `UPDATE imaging_requests SET assigned_radiologist_id = ?, status = CASE WHEN status = 'submitted' THEN 'in_progress' ELSE status END, updated_at = datetime('now') WHERE id = ?`,
+      ).run(Number(radiologistId), request.id);
+      return get(request.id);
+    },
+  };
+}
+
+
+========================================
+FILE: server\src\services\reports.js
+========================================
+import { AppError, cleanText } from '../utils/http.js';
+
+const SELECT = `
+  SELECT r.id, r.imaging_study_id AS imagingStudyId, r.patient_id AS patientId,
+         r.imaging_request_id AS imagingRequestId, r.radiologist_id AS radiologistId,
+         r.findings, r.impression, r.status, r.created_at AS createdAt, r.updated_at AS updatedAt,
+         r.approved_at AS approvedAt,
+         p.mrn, p.first_name AS firstName, p.last_name AS lastName,
+         COALESCE(rad.full_name, rad.username) AS radiologistName
+  FROM radiology_reports r
+  JOIN patients p ON p.id = r.patient_id
+  LEFT JOIN users rad ON rad.id = r.radiologist_id
+`;
+
+export function createReportService(db, { notifications } = {}) {
+  const getById = db.prepare(`${SELECT} WHERE r.id = ?`);
+
+  function get(id) {
+    return getById.get(Number(id)) ?? null;
+  }
+
+  function list({ patientId, status, radiologistId, limit = 100 } = {}) {
+    const clauses = [];
+    const params = { limit: Math.min(Math.max(Number(limit) || 100, 1), 300) };
+    if (patientId) {
+      clauses.push('r.patient_id = @patientId');
+      params.patientId = Number(patientId);
+    }
+    if (status && status !== 'all') {
+      clauses.push('r.status = @status');
+      params.status = status;
+    }
+    if (radiologistId) {
+      clauses.push('r.radiologist_id = @radiologistId');
+      params.radiologistId = Number(radiologistId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return db.prepare(`${SELECT} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT @limit`).all(params);
+  }
+
+  return {
+    get,
+    list,
+
+    saveDraft({ id, patientId, imagingStudyId, imagingRequestId, radiologistId, findings, impression }) {
+      const payload = {
+        findings: cleanText(findings, 8000) ?? '',
+        impression: cleanText(impression, 4000) ?? '',
+      };
+      if (id) {
+        const existing = get(Number(id));
+        if (!existing) {
+          throw new AppError('Report not found.', 404);
+        }
+        if (existing.status === 'approved') {
+          throw new AppError('Approved reports cannot be edited.', 409);
+        }
+        if (Number(existing.radiologistId) !== Number(radiologistId)) {
+          throw new AppError('You can only edit your own draft reports.', 403);
+        }
+        db.prepare(
+          `UPDATE radiology_reports SET findings = ?, impression = ?, imaging_study_id = ?, updated_at = datetime('now') WHERE id = ?`,
+        ).run(payload.findings, payload.impression, imagingStudyId ? Number(imagingStudyId) : existing.imagingStudyId, existing.id);
+        return get(existing.id);
+      }
+
+      const patient = db.prepare('SELECT id FROM patients WHERE id = ?').get(Number(patientId));
+      if (!patient) {
+        throw new AppError('Patient not found.', 404);
+      }
+      const result = db
+        .prepare(
+          `INSERT INTO radiology_reports (
+             imaging_study_id, patient_id, imaging_request_id, radiologist_id, findings, impression, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+        )
+        .run(
+          imagingStudyId ? Number(imagingStudyId) : null,
+          patient.id,
+          imagingRequestId ? Number(imagingRequestId) : null,
+          radiologistId,
+          payload.findings,
+          payload.impression,
+        );
+      return get(result.lastInsertRowid);
+    },
+
+    approve(id, radiologistId) {
+      const report = get(Number(id));
+      if (!report) {
+        throw new AppError('Report not found.', 404);
+      }
+      if (report.status === 'approved') {
+        throw new AppError('This report is already approved.', 409);
+      }
+      if (Number(report.radiologistId) !== Number(radiologistId)) {
+        throw new AppError('Only the authoring radiologist can approve this report.', 403);
+      }
+      if (!report.findings && !report.impression) {
+        throw new AppError('Add findings or an impression before approving.');
+      }
+      db.prepare(
+        `UPDATE radiology_reports SET status = 'approved', approved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
+      ).run(report.id);
+
+      notifications?.notifyRole('practitioner', {
+        type: 'report_ready',
+        title: 'Radiology report available',
+        message: `An approved report is available for ${report.firstName} ${report.lastName}.`,
+        resourceType: 'report',
+        resourceId: report.id,
+      });
+
+      return get(report.id);
+    },
+  };
+}
+
+
+========================================
+FILE: server\src\services\appointments.js
+========================================
+import { AppError, cleanText } from '../utils/http.js';
+import { isValidDate, localDate } from './schedule.js';
+
+export const APPOINTMENT_STATUSES = ['scheduled', 'completed', 'cancelled', 'missed'];
+
+const SELECT = `
+  SELECT a.id, a.patient_id AS patientId, a.scheduled_date AS date, a.scheduled_time AS time,
+         a.examination, a.modality, a.status, a.notes, a.grace_alert_sent AS graceAlertSent,
+         a.assigned_user_id AS assignedUserId, a.requested_by AS requestedBy,
+         a.created_at AS createdAt, a.updated_at AS updatedAt, a.completed_at AS completedAt, a.missed_at AS missedAt,
+         p.mrn, p.first_name AS firstName, p.last_name AS lastName,
+         COALESCE(assignee.full_name, assignee.username) AS assignedTo,
+         requester.username AS requestedByUsername
+  FROM appointments a
+  JOIN patients p ON p.id = a.patient_id
+  LEFT JOIN users assignee ON assignee.id = a.assigned_user_id
+  LEFT JOIN users requester ON requester.id = a.requested_by
+`;
+
+export function createAppointmentService(db, { notifications, alerts } = {}) {
+  const getById = db.prepare(`${SELECT} WHERE a.id = ?`);
+
+  function get(id) {
+    return getById.get(Number(id)) ?? null;
+  }
+
+  function requireAppointment(id) {
+    const appointment = get(id);
+    if (!appointment) {
+      throw new AppError('Appointment not found.', 404);
+    }
+    return appointment;
+  }
+
+  function validate(input) {
+    const date = String(input.date || '').trim();
+    const time = String(input.time || '').trim();
+    if (!isValidDate(date)) {
+      throw new AppError('Enter a valid appointment date.');
+    }
+    if (!/^\d{2}:\d{2}$/.test(time)) {
+      throw new AppError('Enter a valid time in HH:MM format.');
+    }
+    const examination = cleanText(input.examination, 120);
+    const modality = String(input.modality || '').trim().toUpperCase();
+    if (!examination || !modality) {
+      throw new AppError('Examination and modality are required.');
+    }
+    return {
+      date,
+      time,
+      examination,
+      modality,
+      notes: cleanText(input.notes, 400) ?? null,
+      assignedUserId: input.assignedUserId ? Number(input.assignedUserId) : null,
+    };
+  }
+
+  function list({ status, dateFrom, dateTo, patientId, limit = 200 } = {}) {
+    const clauses = [];
+    const params = { limit: Math.min(Math.max(Number(limit) || 200, 1), 500) };
+    if (status && status !== 'all') {
+      clauses.push('a.status = @status');
+      params.status = status;
+    }
+    if (dateFrom) {
+      clauses.push('a.scheduled_date >= @dateFrom');
+      params.dateFrom = dateFrom;
+    }
+    if (dateTo) {
+      clauses.push('a.scheduled_date <= @dateTo');
+      params.dateTo = dateTo;
+    }
+    if (patientId) {
+      clauses.push('a.patient_id = @patientId');
+      params.patientId = Number(patientId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return db
+      .prepare(`${SELECT} ${where} ORDER BY a.scheduled_date, a.scheduled_time, a.id LIMIT @limit`)
+      .all(params);
+  }
+
+  function counts() {
+    const rows = db.prepare(`SELECT status, COUNT(*) AS total FROM appointments GROUP BY status`).all();
+    const summary = { scheduled: 0, completed: 0, cancelled: 0, missed: 0 };
+    for (const row of rows) {
+      summary[row.status] = row.total;
+    }
+    return summary;
+  }
+
+  return {
+    get,
+    list,
+    counts,
+
+    create({ patientId, requestedBy, createdBy, ...input }) {
+      const patient = db.prepare('SELECT id FROM patients WHERE id = ? AND status = ?').get(Number(patientId), 'active');
+      if (!patient) {
+        throw new AppError('Patient not found or archived.', 404);
+      }
+      const entry = validate(input);
+      const result = db
+        .prepare(
+          `INSERT INTO appointments (
+             patient_id, scheduled_date, scheduled_time, examination, modality,
+             assigned_user_id, requested_by, notes, created_by, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        )
+        .run(
+          patient.id,
+          entry.date,
+          entry.time,
+          entry.examination,
+          entry.modality,
+          entry.assignedUserId,
+          requestedBy ?? null,
+          entry.notes,
+          createdBy ?? null,
+        );
+      return get(result.lastInsertRowid);
+    },
+
+    setStatus(id, status, actorId) {
+      const appointment = requireAppointment(id);
+      if (!APPOINTMENT_STATUSES.includes(status)) {
+        throw new AppError('Invalid appointment status.');
+      }
+      if (appointment.status === 'cancelled' && status !== 'cancelled') {
+        throw new AppError('Cancelled appointments cannot be reopened.', 409);
+      }
+      const extra =
+        status === 'completed'
+          ? `, completed_at = datetime('now')`
+          : status === 'missed'
+            ? `, missed_at = datetime('now')`
+            : '';
+      db.prepare(`UPDATE appointments SET status = ?, updated_at = datetime('now')${extra} WHERE id = ?`).run(status, appointment.id);
+
+      if (status === 'missed' && notifications) {
+        notifications.notifyRole('administrator', {
+          type: 'missed_appointment',
+          title: 'Missed appointment',
+          message: `${appointment.firstName} ${appointment.lastName} missed ${appointment.examination} on ${appointment.date}.`,
+          resourceType: 'appointment',
+          resourceId: appointment.id,
+        });
+        alerts?.raise({
+          type: 'no_show',
+          description: `Missed appointment ${appointment.id} for ${appointment.firstName} ${appointment.lastName}.`,
+          resource: `appointment:${appointment.id}`,
+          dedupeMinutes: 60,
+        });
+      }
+
+      if (status === 'cancelled' && notifications) {
+        notifications.notifyRole('administrator', {
+          type: 'cancelled_appointment',
+          title: 'Appointment cancelled',
+          message: `Appointment ${appointment.id} (${appointment.examination}) was cancelled.`,
+          resourceType: 'appointment',
+          resourceId: appointment.id,
+        });
+      }
+
+      void actorId;
+      return get(appointment.id);
+    },
+
+    processOverdue() {
+      const today = localDate();
+      const overdue = db
+        .prepare(
+          `SELECT id FROM appointments
+           WHERE status = 'scheduled' AND (scheduled_date < @today OR (scheduled_date = @today AND scheduled_time < @now))`,
+        )
+        .all({ today, now: new Date().toTimeString().slice(0, 5) });
+
+      for (const row of overdue) {
+        this.setStatus(row.id, 'missed', null);
+      }
+
+      const graceDue = db
+        .prepare(
+          `SELECT a.id, p.first_name AS firstName, p.last_name AS lastName, a.examination, a.scheduled_date AS date
+           FROM appointments a
+           JOIN patients p ON p.id = a.patient_id
+           WHERE a.status = 'missed'
+             AND a.grace_alert_sent = 0
+             AND datetime(a.scheduled_date || ' ' || a.scheduled_time) <= datetime('now', '-2 days')`,
+        )
+        .all();
+
+      for (const row of graceDue) {
+        notifications?.notifyRole('administrator', {
+          type: 'unattended_grace',
+          title: 'Unattended appointment (2-day grace elapsed)',
+          message: `${row.firstName} ${row.lastName}: ${row.examination} on ${row.date} remains unattended after the two-day grace period.`,
+          resourceType: 'appointment',
+          resourceId: row.id,
+        });
+        alerts?.raise({
+          type: 'no_show',
+          description: `Two-day grace elapsed for unattended appointment ${row.id} (${row.firstName} ${row.lastName}).`,
+          resource: `appointment-grace:${row.id}`,
+        });
+        db.prepare(`UPDATE appointments SET grace_alert_sent = 1 WHERE id = ?`).run(row.id);
+      }
+
+      return { markedMissed: overdue.length, graceAlerts: graceDue.length };
+    },
+  };
+}
+
+
+========================================
+FILE: server\src\seed.js
+========================================
+import bcrypt from 'bcryptjs';
+
+function upsertUser(db, { username, password, role, fullName, department }) {
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  if (existing) {
+    return { created: false, id: existing.id };
+  }
+  const result = db
+    .prepare(
+      `INSERT INTO users (username, password_hash, role, full_name, department, status, restricted, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'active', 0, datetime('now'))`,
+    )
+    .run(username, bcrypt.hashSync(password, 10), role, fullName, department);
+  return { created: true, id: result.lastInsertRowid };
+}
+
+export function seedDevelopmentAdmin(db, { username, password }) {
+  if (!username || !password) {
+    return { created: false, reason: 'missing-credentials' };
+  }
+  return upsertUser(db, {
+    username,
+    password,
+    role: 'administrator',
+    fullName: 'Development Administrator',
+    department: 'Administration',
+  });
+}
+
+export function seedDemoAccounts(db, accounts = {}) {
+  const created = [];
+  if (accounts.adminUsername && accounts.adminPassword) {
+    created.push(
+      seedDevelopmentAdmin(db, { username: accounts.adminUsername, password: accounts.adminPassword }),
+    );
+  }
+  if (accounts.practitionerUsername && accounts.practitionerPassword) {
+    created.push(
+      upsertUser(db, {
+        username: accounts.practitionerUsername,
+        password: accounts.practitionerPassword,
+        role: 'practitioner',
+        fullName: 'Demo Practitioner',
+        department: 'Outpatients',
+      }),
+    );
+  }
+  if (accounts.radiologistUsername && accounts.radiologistPassword) {
+    created.push(
+      upsertUser(db, {
+        username: accounts.radiologistUsername,
+        password: accounts.radiologistPassword,
+        role: 'radiologist',
+        fullName: 'Demo Radiologist',
+        department: 'Radiology',
+      }),
+    );
+  }
+  return created;
+}
+
+export function seedDemoClinicalData(db) {
+  if (db.prepare('SELECT COUNT(*) AS total FROM patients').get().total > 0) {
+    return { seeded: false };
+  }
+
+  const admin = db.prepare(`SELECT id FROM users WHERE role = 'administrator' LIMIT 1`).get();
+  const practitioner = db.prepare(`SELECT id FROM users WHERE role = 'practitioner' LIMIT 1`).get();
+  const radiologist = db.prepare(`SELECT id FROM users WHERE role = 'radiologist' LIMIT 1`).get();
+  const createdBy = admin?.id ?? practitioner?.id ?? null;
+
+  const insertPatient = db.prepare(
+    `INSERT INTO patients (mrn, first_name, last_name, date_of_birth, sex, notes, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const chest = insertPatient.run(
+    'DEMO-CHEST-001',
+    'Amina',
+    'Demo',
+    '1978-04-12',
+    'F',
+    'De-identified demonstration record for chest radiography workflows. Not a real patient.',
+    createdBy,
+  );
+  const foot = insertPatient.run(
+    'DEMO-FOOT-002',
+    'Joseph',
+    'Demo',
+    '1969-11-03',
+    'M',
+    'De-identified demonstration record for extremity coverage assessment. Not a real patient.',
+    createdBy,
+  );
+
+  const insertAppointment = db.prepare(
+    `INSERT INTO appointments (patient_id, scheduled_date, scheduled_time, examination, modality, assigned_user_id, requested_by, status, notes, created_by)
+     VALUES (?, date('now', ?), ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertAppointment.run(chest.lastInsertRowid, '+1 day', '09:30', 'Chest PA', 'XR', radiologist?.id ?? null, practitioner?.id ?? null, 'scheduled', 'Demo scheduled examination.', createdBy);
+  insertAppointment.run(foot.lastInsertRowid, '-1 day', '14:00', 'Foot AP', 'XR', radiologist?.id ?? null, practitioner?.id ?? null, 'completed', 'Demo completed examination.', createdBy);
+  insertAppointment.run(chest.lastInsertRowid, '-3 day', '11:15', 'Chest PA', 'XR', radiologist?.id ?? null, practitioner?.id ?? null, 'missed', 'Demo missed examination.', createdBy);
+  insertAppointment.run(foot.lastInsertRowid, '-2 day', '08:00', 'Foot oblique', 'XR', null, practitioner?.id ?? null, 'cancelled', 'Demo cancelled examination.', createdBy);
+
+  if (practitioner?.id) {
+    db.prepare(
+      `INSERT INTO imaging_requests (patient_id, requested_by, assigned_radiologist_id, examination, modality, priority, clinical_indication, status)
+       VALUES (?, ?, ?, 'Chest PA', 'XR', 'routine', 'Cough. Demonstration request only.', 'submitted')`,
+    ).run(chest.lastInsertRowid, practitioner.id, radiologist?.id ?? null);
+  }
+
+  return { seeded: true };
+}
+
+
+========================================
+FILE: server\src\routes\admin.js
+========================================
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Router } from 'express';
+import { AUDIT_CATEGORIES } from '../services/audit.js';
+import { ALERT_TYPES } from '../services/alerts.js';
+import { MIN_PASSWORD_LENGTH, ROLES, UserError } from '../services/users.js';
+import { MODALITIES, SCHEDULE_STATUSES, ScheduleError, isValidDate, localDate } from '../services/schedule.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const packageInfo = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'));
+const startedAt = new Date();
+
+function handle(fn) {
+  return async (req, res, next) => {
+    try {
+      await fn(req, res);
+    } catch (error) {
+      if (error instanceof UserError || error instanceof ScheduleError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      return next(error);
+    }
+  };
+}
+
+function requestDate(value) {
+  return isValidDate(value) ? value : localDate();
+}
+
+function shiftDate(date, days) {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + days);
+  return localDate(value);
+}
+
+function roleLabel(role) {
+  if (role === 'administrator') return 'Administrator';
+  if (role === 'radiologist') return 'Radiologist';
+  return 'Practitioner';
+}
+
+function splitModalities(value) {
+  return String(value || '')
+    .split(/[\\,]\s*/)
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+export function createAdminRouter({ db, audit, users, schedule, alerts, orthanc }) {
+  const router = Router();
+
+  function log(req, action, target, description) {
+    audit.log({ userId: req.user?.id ?? null, action, target, description: `User "${req.user?.username ?? 'unknown'}" ${description}` });
+  }
+
+  async function orthancSnapshot() {
+    try {
+      const health = await orthanc.getHealth();
+      if (!health.connected) {
+        return { ...health, studies: null, series: null, instances: null };
+      }
+      const counts = await orthanc.getConnectionSummary();
+      return { ...health, ...counts };
+    } catch {
+      return { connected: false, status: 'Orthanc unavailable', studies: null, series: null, instances: null };
+    }
+  }
+
+  router.get(
+    '/meta',
+    handle((_req, res) => {
+      res.json({
+        roles: ROLES.map((value) => ({ value, label: roleLabel(value) })),
+        modalities: MODALITIES.map(({ code, label }) => ({ code, label })),
+        scheduleStatuses: SCHEDULE_STATUSES.map((value) => ({ value, label: schedule.statusLabel(value) })),
+        alertTypes: ALERT_TYPES,
+        auditCategories: Object.keys(AUDIT_CATEGORIES),
+        minPasswordLength: MIN_PASSWORD_LENGTH,
+      });
+    }),
+  );
+
+  // ---------- Overview ----------
+  router.get(
+    '/overview',
+    handle(async (req, res) => {
+      const date = requestDate(req.query.date);
+      log(req, 'view_admin_dashboard', 'admin_dashboard', 'viewed the administrator dashboard.');
+
+      const allUsers = users.list();
+      const current = allUsers.filter((user) => user.status !== 'removed');
+
+      res.json({
+        date,
+        users: {
+          total: current.length,
+          administrators: current.filter((user) => user.role === 'administrator').length,
+          activePractitioners: current.filter(
+            (user) => user.role === 'practitioner' && user.status === 'active' && !user.restricted,
+          ).length,
+          inactive: current.filter((user) => user.status === 'inactive').length,
+          restricted: current.filter((user) => user.restricted).length,
+        },
+        schedule: {
+          summary: schedule.summaryForDate(date),
+          today: schedule.list({ dateFrom: date, dateTo: date }),
+          totalEntries: schedule.count(),
+        },
+        alerts: alerts.list({ limit: 6 }),
+        recentAudit: audit.list({ limit: 8 }).entries,
+        modalities: schedule.modalityBreakdown({ date, dateFrom: shiftDate(date, -29), dateTo: date }),
+        orthanc: await orthancSnapshot(),
+      });
+    }),
+  );
+
+  // ---------- Users ----------
+  router.get(
+    '/users',
+    handle((req, res) => {
+      log(req, 'view_user_management', 'user_management', 'viewed user management.');
+      res.json({ users: users.list() });
+    }),
+  );
+
+  router.post(
+    '/users',
+    handle((req, res) => {
+      const body = req.body || {};
+      const user = users.create({
+        username: body.username,
+        password: body.password,
+        role: body.role,
+        fullName: body.fullName,
+        email: body.email,
+        department: body.department,
+      });
+      log(req, 'user_create', `user:${user.username}`, `created ${roleLabel(user.role)} account "${user.username}".`);
+      res.status(201).json({ user });
+    }),
+  );
+
+  router.patch(
+    '/users/:id',
+    handle((req, res) => {
+      const body = req.body || {};
+      const result = users.update(
+        req.params.id,
+        {
+          fullName: body.fullName,
+          email: body.email,
+          department: body.department,
+          role: body.role,
+          password: body.password,
+        },
+        req.user.id,
+      );
+      const target = `user:${result.user.username}`;
+      log(req, 'user_update', target, `updated account details for "${result.user.username}".`);
+      if (result.roleChanged) {
+        log(
+          req,
+          'user_role_change',
+          target,
+          `changed role of "${result.user.username}" from ${roleLabel(result.before.role)} to ${roleLabel(result.user.role)}.`,
+        );
+      }
+      if (result.passwordChanged) {
+        log(req, 'user_password_reset', target, `reset the password for "${result.user.username}".`);
+      }
+      res.json({ user: result.user });
+    }),
+  );
+
+  function statusRoute(status, action, verb) {
+    return handle((req, res) => {
+      const user = users.setStatus(req.params.id, status, req.user.id);
+      log(req, action, `user:${user.username}`, `${verb} account "${user.username}".`);
+      if (status !== 'active') {
+        alerts.raise({ type: 'access', description: `Account "${user.username}" was ${verb} by ${req.user.username}.`, resource: `user:${user.username}` });
+      }
+      res.json({ user });
+    });
+  }
+
+  router.post('/users/:id/activate', statusRoute('active', 'user_activate', 'activated'));
+  router.post('/users/:id/deactivate', statusRoute('inactive', 'user_deactivate', 'deactivated'));
+  // Accounts are archived rather than deleted so historical audit records keep their user reference.
+  router.delete('/users/:id', statusRoute('removed', 'user_remove', 'removed'));
+
+  router.post(
+    '/users/:id/restrict',
+    handle((req, res) => {
+      const reason = String(req.body?.reason || '').trim();
+      if (!reason) {
+        return res.status(400).json({ error: 'A restriction reason is required.' });
+      }
+      const user = users.setRestriction(req.params.id, true, reason, req.user.id);
+      log(req, 'user_restrict', `user:${user.username}`, `restricted sign-in for "${user.username}". Reason: ${user.restrictionReason}`);
+      alerts.raise({
+        type: 'access',
+        description: `Sign-in restricted for "${user.username}" by ${req.user.username}.`,
+        resource: `user:${user.username}`,
+      });
+      return res.json({ user });
+    }),
+  );
+
+  router.post(
+    '/users/:id/unrestrict',
+    handle((req, res) => {
+      const user = users.setRestriction(req.params.id, false, null, req.user.id);
+      log(req, 'user_unrestrict', `user:${user.username}`, `removed sign-in restriction for "${user.username}".`);
+      res.json({ user });
+    }),
+  );
+
+  // ---------- Imaging schedule ----------
+  router.get(
+    '/schedule',
+    handle((req, res) => {
+      const entries = schedule.list({
+        dateFrom: req.query.dateFrom,
+        dateTo: req.query.dateTo,
+        modality: req.query.modality,
+        status: req.query.status,
+      });
+      const practitioners = users
+        .list()
+        .filter((user) => user.role === 'practitioner' && user.status === 'active')
+        .map((user) => ({ id: user.id, name: user.fullName || user.username, username: user.username }));
+      res.json({ entries, practitioners });
+    }),
+  );
+
+  router.post(
+    '/schedule',
+    handle((req, res) => {
+      const { entry, conflicts } = schedule.create(req.body || {}, req.user.id);
+      log(req, 'schedule_create', `schedule #${entry.id}`, `scheduled ${entry.examination} (${entry.modality}) for ${entry.date} ${entry.time}.`);
+      res.status(201).json({ entry, conflicts });
+    }),
+  );
+
+  router.patch(
+    '/schedule/:id',
+    handle((req, res) => {
+      const { entry, conflicts } = schedule.update(req.params.id, req.body || {});
+      log(req, 'schedule_update', `schedule #${entry.id}`, `updated ${entry.examination} (${entry.modality}) for ${entry.date} ${entry.time}.`);
+      res.json({ entry, conflicts });
+    }),
+  );
+
+  router.post(
+    '/schedule/:id/status',
+    handle((req, res) => {
+      const { before, entry } = schedule.setStatus(req.params.id, String(req.body?.status || ''));
+      log(
+        req,
+        'schedule_status_change',
+        `schedule #${entry.id}`,
+        `changed ${entry.examination} (${entry.modality}) from ${schedule.statusLabel(before.status)} to ${schedule.statusLabel(entry.status)}.`,
+      );
+      res.json({ entry });
+    }),
+  );
+
+  // ---------- Alerts ----------
+  router.get(
+    '/alerts',
+    handle((req, res) => {
+      log(req, 'view_alerts', 'alerts', 'viewed administrative alerts.');
+      res.json(alerts.list({ status: req.query.status, type: req.query.type, limit: 500 }));
+    }),
+  );
+
+  router.post(
+    '/alerts/:id/review',
+    handle((req, res) => {
+      const alert = alerts.get(req.params.id);
+      if (!alert) {
+        return res.status(404).json({ error: 'Alert not found.' });
+      }
+      if (alerts.review(alert.id, req.user.id)) {
+        log(req, 'alert_review', `alert #${alert.id}`, `marked alert #${alert.id} (${alert.type}) as reviewed.`);
+      }
+      return res.json({ alert: alerts.get(alert.id) });
+    }),
+  );
+
+  // ---------- Modality monitoring ----------
+  router.get(
+    '/modalities',
+    handle(async (req, res) => {
+      const date = requestDate(req.query.date);
+      log(req, 'view_modality_monitoring', 'modality_monitoring', 'viewed modality monitoring.');
+
+      const breakdown = schedule.modalityBreakdown({ date, dateFrom: shiftDate(date, -29), dateTo: date });
+      const status = await orthancSnapshot();
+      let archive = null;
+
+      if (status.connected) {
+        const studies = await orthanc.listStudies({ limit: 200 });
+        const counts = {};
+        for (const study of studies) {
+          for (const code of new Set(splitModalities(study.modalitiesInStudy))) {
+            counts[code] = (counts[code] || 0) + 1;
+          }
+        }
+        archive = {
+          sampled: studies.length,
+          byModality: Object.fromEntries(
+            MODALITIES.map((item) => [item.code, item.dicom.reduce((sum, code) => sum + (counts[code] || 0), 0)]),
+          ),
+        };
+      }
+
+      res.json({ date, period: { from: shiftDate(date, -29), to: date }, modalities: breakdown, orthanc: status, archive });
+    }),
+  );
+
+  // ---------- System ----------
+  router.get(
+    '/system',
+    handle(async (req, res) => {
+      log(req, 'view_system_administration', 'system_administration', 'viewed system administration.');
+
+      const count = (table) => db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
+      let database;
+      try {
+        database = {
+          connected: true,
+          engine: 'SQLite',
+          version: db.prepare('SELECT sqlite_version() AS version').get().version,
+          journalMode: db.pragma('journal_mode', { simple: true }),
+          integrity: db.pragma('quick_check', { simple: true }),
+          records: {
+            users: count('users'),
+            auditLogs: count('audit_logs'),
+            scheduleEntries: count('imaging_schedule'),
+            alerts: count('alerts'),
+          },
+        };
+      } catch {
+        database = { connected: false, engine: 'SQLite' };
+      }
+
+      const allUsers = users.list();
+      res.json({
+        application: {
+          name: 'OrthoView+',
+          version: packageInfo.version,
+          runtime: `Node.js ${process.version}`,
+          startedAt: startedAt.toISOString(),
+          uptimeSeconds: Math.round(process.uptime()),
+        },
+        database,
+        orthanc: await orthancSnapshot(),
+        access: {
+          roles: ROLES.map((value) => ({
+            value,
+            label: roleLabel(value),
+            active: allUsers.filter((user) => user.role === value && user.status === 'active').length,
+          })),
+          restrictedAccounts: allUsers.filter((user) => user.restricted && user.status !== 'removed').length,
+          inactiveAccounts: allUsers.filter((user) => user.status === 'inactive').length,
+          minPasswordLength: MIN_PASSWORD_LENGTH,
+        },
+      });
+    }),
+  );
+
+  return router;
+}
+
+
+========================================
+FILE: server\src\utils\http.js
+========================================
+export class AppError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export function handleRoute(fn) {
+  return async (req, res, next) => {
+    try {
+      await fn(req, res);
+    } catch (error) {
+      if (error.status) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      return next(error);
+    }
+  };
+}
+
+export function cleanText(value, maxLength = 240) {
+  if (value === undefined) {
+    return undefined;
+  }
+  const text = String(value ?? '').trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
+export function requireFields(body, fields) {
+  for (const field of fields) {
+    if (!String(body?.[field] ?? '').trim()) {
+      throw new AppError(`${field} is required.`);
+    }
+  }
+}
+
+
+========================================
+FILE: client\src\App.jsx
+========================================
+import { Navigate, Route, Routes } from 'react-router-dom';
+import Layout from './components/Layout.jsx';
+import ProtectedRoute from './components/ProtectedRoute.jsx';
+import Login from './pages/Login.jsx';
+import Dashboard from './pages/Dashboard.jsx';
+import ExposureIndex from './pages/ExposureIndex.jsx';
+import CompareScans from './pages/CompareScans.jsx';
+import AuditLog from './pages/AuditLog.jsx';
+import AdminDashboard from './pages/admin/AdminDashboard.jsx';
+import UserManagement from './pages/admin/UserManagement.jsx';
+import ImagingSchedule from './pages/admin/ImagingSchedule.jsx';
+import Alerts from './pages/admin/Alerts.jsx';
+import ModalityMonitoring from './pages/admin/ModalityMonitoring.jsx';
+import SystemAdministration from './pages/admin/SystemAdministration.jsx';
+import AdminProfile from './pages/admin/AdminProfile.jsx';
+import AdminRoute from './components/AdminRoute.jsx';
+import PractitionerRoute from './components/PractitionerRoute.jsx';
+import { useAuth } from './context/AuthContext.jsx';
+import { homePathFor } from './utils/format.js';
+
+function HomeRedirect() {
+  const { isAuthenticated, ready, user } = useAuth();
+  if (!ready) {
+    return <div className="auth-loading">Loading OrthoView+...</div>;
+  }
+  return <Navigate to={isAuthenticated ? homePathFor(user?.role) : '/login'} replace />;
+}
+
+const practitionerPages = [
+  ['/dashboard', <Dashboard />],
+  ['/exposure-index', <ExposureIndex />],
+  ['/compare-scans', <CompareScans />],
+];
+
+const adminPages = [
+  ['/admin/dashboard', <AdminDashboard />],
+  ['/admin/users', <UserManagement />],
+  ['/admin/schedule', <ImagingSchedule />],
+  ['/admin/alerts', <Alerts />],
+  ['/admin/audit-logs', <AuditLog />],
+  ['/admin/modalities', <ModalityMonitoring />],
+  ['/admin/system', <SystemAdministration />],
+  ['/admin/profile', <AdminProfile />],
+];
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<HomeRedirect />} />
+      <Route path="/login" element={<Login />} />
+      <Route
+        element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }
+      >
+        {practitionerPages.map(([path, element]) => (
+          <Route key={path} path={path} element={<PractitionerRoute>{element}</PractitionerRoute>} />
+        ))}
+        {adminPages.map(([path, element]) => (
+          <Route key={path} path={path} element={<AdminRoute>{element}</AdminRoute>} />
+        ))}
+        <Route path="/audit-log" element={<Navigate to="/admin/audit-logs" replace />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+
+========================================
+FILE: client\src\context\AuthContext.jsx
+========================================
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import api from '../api/client.js';
+
+const AuthContext = createContext(null);
+const TOKEN_KEY = 'orthoviewplus_token';
+const USER_KEY = 'orthoviewplus_user';
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
+  const [ready, setReady] = useState(false);
+
+  const clearSession = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    setToken(null);
+    setUser(null);
+  }, []);
+
+  useEffect(() => {
+    const interceptor = api.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (error.response?.status === 401 && localStorage.getItem(TOKEN_KEY)) {
+          clearSession();
+        }
+
+        return Promise.reject(error);
+      },
+    );
+
+    return () => {
+      api.interceptors.response.eject(interceptor);
+    };
+  }, [clearSession]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreSession() {
+      const storedToken = localStorage.getItem(TOKEN_KEY);
+      const storedUser = localStorage.getItem(USER_KEY);
+
+      if (!storedToken) {
+        if (!cancelled) {
+          setReady(true);
+        }
+        return;
+      }
+
+      if (storedUser) {
+        try {
+          setUser(JSON.parse(storedUser));
+          setToken(storedToken);
+        } catch {
+          clearSession();
+        }
+      } else {
+        setToken(storedToken);
+      }
+
+      try {
+        const response = await api.get('/auth/me');
+        if (cancelled) {
+          return;
+        }
+
+        localStorage.setItem(USER_KEY, JSON.stringify(response.data.user));
+        setUser(response.data.user);
+        setToken(storedToken);
+      } catch {
+        if (!cancelled) {
+          clearSession();
+        }
+      } finally {
+        if (!cancelled) {
+          setReady(true);
+        }
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clearSession]);
+
+  const value = useMemo(
+    () => ({
+      user,
+      token,
+      ready,
+      isAuthenticated: Boolean(token),
+      async login(username, password) {
+        const response = await api.post('/auth/login', { username, password });
+        localStorage.setItem(TOKEN_KEY, response.data.token);
+        localStorage.setItem(USER_KEY, JSON.stringify(response.data.user));
+        setToken(response.data.token);
+        setUser(response.data.user);
+        return response.data.user;
+      },
+      async logout() {
+        try {
+          await api.post('/auth/logout');
+        } catch {
+          // Local session is still cleared even if the audit request fails.
+        }
+        clearSession();
+      },
+    }),
+    [user, token, ready, clearSession],
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within AuthProvider');
+  }
+  return context;
+}
+
+
+========================================
+FILE: client\src\components\Layout.jsx
+========================================
+import { Link, Outlet, useLocation } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext.jsx';
+import { formatRole, getInitials } from '../utils/format.js';
+import Sidebar from './Sidebar.jsx';
+
+const pageMeta = {
+  '/dashboard': {
+    title: 'Dashboard',
+    description: 'PACS connectivity, archive volume and recent workstation activity.',
+  },
+  '/exposure-index': {
+    title: 'Exposure Index',
+    description: 'Dose-related acquisition indicators (EI, EIT, DI) retrieved from Orthanc.',
+  },
+  '/compare-scans': {
+    title: 'Compare Scans',
+    description: 'Side-by-side comparison of study and acquisition metadata.',
+  },
+  '/audit-log': {
+    title: 'Audit Log',
+    description: 'System activity trail. Administrator access only.',
+  },
+  '/admin/dashboard': {
+    title: 'Admin Dashboard',
+    description: 'Imaging department operations, accounts and system activity at a glance.',
+  },
+  '/admin/users': {
+    title: 'User Management',
+    description: 'Create and maintain accounts, roles, status and sign-in restrictions.',
+  },
+  '/admin/schedule': {
+    title: 'Imaging Schedule',
+    description: 'Operational scheduling and status tracking for imaging examinations.',
+  },
+  '/admin/alerts': {
+    title: 'Alerts',
+    description: 'Operational, scheduling and account/access alerts requiring administrative review.',
+  },
+  '/admin/audit-logs': {
+    title: 'Audit Logs',
+    description: 'Read-only accountability record of all application activity.',
+  },
+  '/admin/modalities': {
+    title: 'Modality Monitoring',
+    description: 'Schedule-derived operational activity per imaging modality.',
+  },
+  '/admin/system': {
+    title: 'System Administration',
+    description: 'Access policy, application, database and imaging system status.',
+  },
+  '/admin/profile': {
+    title: 'Administrator Profile',
+    description: 'Your account information.',
+  },
+};
+
+function sectionFor(pathname) {
+  if (['/admin/dashboard', '/admin/schedule', '/admin/alerts', '/admin/modalities'].includes(pathname)) return 'Department';
+  if (['/admin/users', '/admin/audit-logs', '/admin/system'].includes(pathname)) return 'Administration';
+  if (pathname === '/admin/profile') return 'Account';
+  return 'Clinical Workspace';
+}
+
+const todayLabel = () =>
+  new Date().toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+
+export default function Layout() {
+  const { pathname } = useLocation();
+  const { user } = useAuth();
+  const meta = pageMeta[pathname] ?? { title: 'OrthoView+', description: '' };
+  const UserArea = user?.role === 'administrator' ? Link : 'div';
+  // The Admin Profile page intentionally keeps its original light presentation.
+  const legacyLight = pathname === '/admin/profile';
+
+  return (
+    <div className="app-shell">
+      <Sidebar />
+      <div className="workspace">
+        <header className="topbar">
+          <div className="topbar-title">
+            <span className="topbar-crumb">{sectionFor(pathname)}</span>
+            <h2>{meta.title}</h2>
+            {meta.description ? <p>{meta.description}</p> : null}
+          </div>
+          <div className="topbar-meta">
+            <span className="topbar-date">{todayLabel()}</span>
+            {user ? (
+              <UserArea {...(user.role === 'administrator' ? { to: '/admin/profile', title: 'View administrator profile' } : {})} className="topbar-user">
+                <div className="topbar-user-text">
+                  <strong>{user.username}</strong>
+                  <span>{formatRole(user.role)}</span>
+                </div>
+                <span className="avatar avatar-light" aria-hidden="true">
+                  {getInitials(user.username)}
+                </span>
+              </UserArea>
+            ) : null}
+          </div>
+        </header>
+        <main className={legacyLight ? 'main legacy-light' : 'main'}>
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
+
+
+========================================
+FILE: client\src\components\Sidebar.jsx
+========================================
+import { Link, NavLink } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext.jsx';
+import { formatRole, getInitials } from '../utils/format.js';
+import {
+  AuditIcon,
+  BellIcon,
+  CalendarIcon,
+  CompareIcon,
+  DashboardIcon,
+  ExposureIcon,
+  LogoMark,
+  LogoutIcon,
+  MonitorIcon,
+  SettingsIcon,
+  UsersIcon,
+} from './Icons.jsx';
+
+const practitionerSections = [
+  {
+    title: 'Clinical Workspace',
+    links: [
+      { to: '/dashboard', label: 'Dashboard', Icon: DashboardIcon },
+      { to: '/exposure-index', label: 'Exposure Index', Icon: ExposureIcon },
+      { to: '/compare-scans', label: 'Compare Scans', Icon: CompareIcon },
+    ],
+  },
+];
+
+const adminSections = [
+  {
+    title: 'Department',
+    links: [
+      { to: '/admin/dashboard', label: 'Admin Dashboard', Icon: DashboardIcon },
+      { to: '/admin/schedule', label: 'Imaging Schedule', Icon: CalendarIcon },
+      { to: '/admin/alerts', label: 'Alerts', Icon: BellIcon },
+      { to: '/admin/modalities', label: 'Modality Monitoring', Icon: MonitorIcon },
+    ],
+  },
+  {
+    title: 'Administration',
+    links: [
+      { to: '/admin/users', label: 'User Management', Icon: UsersIcon },
+      { to: '/admin/audit-logs', label: 'Audit Logs', Icon: AuditIcon },
+      { to: '/admin/system', label: 'System Administration', Icon: SettingsIcon },
+    ],
+  },
+];
+
+function NavItem({ to, label, Icon }) {
+  return (
+    <NavLink to={to} className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+      <Icon size={18} />
+      <span>{label}</span>
+    </NavLink>
+  );
+}
+
+export default function Sidebar() {
+  const { logout, user } = useAuth();
+  const isAdmin = user?.role === 'administrator';
+  const sections = isAdmin ? adminSections : practitionerSections;
+
+  const userBlock = user ? (
+    <>
+      <span className="avatar" aria-hidden="true">
+        {getInitials(user.username)}
+      </span>
+      <div className="sidebar-user-text">
+        <strong title={user.username}>{user.username}</strong>
+        <span>{formatRole(user.role)}</span>
+      </div>
+    </>
+  ) : null;
+
+  return (
+    <aside className="sidebar">
+      <div className="brand">
+        <LogoMark />
+        <div>
+          <h1>OrthoView+</h1>
+          <p>{isAdmin ? 'Department Administration' : 'Imaging Workstation'}</p>
+        </div>
+      </div>
+
+      <nav className="nav" aria-label="Primary">
+        {sections.map((section) => (
+          <div key={section.title} className="nav-group">
+            <p className="nav-section">{section.title}</p>
+            {section.links.map((link) => (
+              <NavItem key={link.to} {...link} />
+            ))}
+          </div>
+        ))}
+      </nav>
+
+      <div className="sidebar-footer">
+        {user && isAdmin ? (
+          <Link to="/admin/profile" className="sidebar-user sidebar-user-link" title="View administrator profile">
+            {userBlock}
+          </Link>
+        ) : null}
+        {user && !isAdmin ? <div className="sidebar-user">{userBlock}</div> : null}
+        <button type="button" className="logout-button" onClick={logout}>
+          <LogoutIcon size={16} />
+          <span>Logout</span>
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+
+========================================
+FILE: client\src\components\RoleRoute.jsx
+========================================
+import { Navigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext.jsx';
+import { homePathFor } from '../utils/format.js';
+import LoadingState from './LoadingState.jsx';
+
+export default function RoleRoute({ roles, children }) {
+  const { ready, user } = useAuth();
+
+  if (!ready) {
+    return <LoadingState message="Checking access rights..." />;
+  }
+
+  if (!roles.includes(user?.role)) {
+    return <Navigate to={homePathFor(user?.role)} replace />;
+  }
+
+  return children;
+}
+
+
+========================================
+FILE: client\src\pages\Dashboard.jsx
+========================================
+import { useEffect, useState } from 'react';
+import api from '../api/client.js';
+import DashboardCard from '../components/DashboardCard.jsx';
+import EmptyState from '../components/EmptyState.jsx';
+import ErrorMessage from '../components/ErrorMessage.jsx';
+import LoadingState from '../components/LoadingState.jsx';
+import StatusBadge from '../components/StatusBadge.jsx';
+import { LayersIcon, ServerIcon, StackIcon, ImageIcon } from '../components/Icons.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
+import { formatActionLabel, formatCount, formatOrthancTimestamp, formatValue } from '../utils/format.js';
+
+function ActivityTable({ title, subtitle, rows, columns, emptyMessage }) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="section-heading">
+          <h3>{title}</h3>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+        <span className="panel-count">{rows.length}</span>
+      </div>
+      {rows.length > 0 ? (
+        <div className="table-wrap flush">
+          <table className="data-table compact-table">
+            <thead>
+              <tr>
+                {columns.map((column) => (
+                  <th key={column.label}>{column.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${row.id ?? index}-${index}`}>
+                  {columns.map((column) => (
+                    <td key={column.label} className={column.className}>
+                      {column.render(row)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="panel-body">
+          <EmptyState compact message={emptyMessage} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AuditTimeline({ rows }) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="section-heading">
+          <h3>Recent Audit Activity</h3>
+          <p>Latest application events recorded by the system</p>
+        </div>
+        <span className="panel-count">{rows.length}</span>
+      </div>
+      <div className="panel-body">
+        {rows.length > 0 ? (
+          <ol className="timeline">
+            {rows.map((row, index) => (
+              <li key={`${row.id ?? index}-${index}`}>
+                <span className="timeline-marker" aria-hidden="true" />
+                <div className="timeline-content">
+                  <div className="timeline-meta">
+                    <span className="action-chip">{formatActionLabel(row.action)}</span>
+                    <span className="mono muted">{formatOrthancTimestamp(row.timestamp)}</span>
+                  </div>
+                  <p>{formatValue(row.description)}</p>
+                  <span className="timeline-user">User: {formatValue(row.username, 'System')}</span>
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <EmptyState compact message="No recent audit entries were returned." />
+        )}
+      </div>
+    </section>
+  );
+}
+
+export default function Dashboard() {
+  const { user } = useAuth();
+  const [summary, setSummary] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError('');
+      try {
+        const response = await api.get('/dashboard');
+        if (!cancelled) {
+          setSummary(response.data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.response?.data?.error || 'The dashboard could not be loaded.');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const connected = Boolean(summary?.connected);
+  const sourceHint = connected ? 'Orthanc archive statistics' : 'Waiting for Orthanc';
+  const cards = [
+    {
+      title: 'Total Studies',
+      value: formatCount(summary?.studies),
+      hint: sourceHint,
+      icon: <LayersIcon size={18} />,
+    },
+    {
+      title: 'Total Series',
+      value: formatCount(summary?.series),
+      hint: sourceHint,
+      icon: <StackIcon size={18} />,
+    },
+    {
+      title: 'Total Instances',
+      value: formatCount(summary?.instances),
+      hint: sourceHint,
+      icon: <ImageIcon size={18} />,
+    },
+    {
+      title: 'PACS Status',
+      value: connected ? 'Connected' : 'Unavailable',
+      hint: summary?.version ? `Orthanc ${summary.version}` : 'Connection checked on each load',
+      icon: <ServerIcon size={18} />,
+      tone: connected ? 'ok' : 'warn',
+    },
+  ];
+
+  const imagingRows = Array.isArray(summary?.recentActivity) ? summary.recentActivity : [];
+  const auditRows = Array.isArray(summary?.recentAudit) ? summary.recentAudit : [];
+
+  return (
+    <section className="page">
+      {loading ? <LoadingState message="Loading workstation status..." /> : null}
+      <ErrorMessage message={error} />
+      {summary ? (
+        <>
+          <div className="status-strip">
+            <div className="status-row">
+              <StatusBadge tone={connected ? 'ok' : 'warn'}>{formatValue(summary.status)}</StatusBadge>
+              <span className="status-caption">
+                {connected ? 'Orthanc is available through the backend.' : 'Orthanc unavailable'}
+              </span>
+              {summary.message ? <span className="status-caption">{summary.message}</span> : null}
+            </div>
+            <span className="status-caption">Signed in as {user?.username}</span>
+          </div>
+
+          <div className="card-grid">
+            {cards.map((card) => (
+              <DashboardCard
+                key={card.title}
+                title={card.title}
+                value={card.value}
+                hint={card.hint}
+                icon={card.icon}
+                tone={card.tone}
+              />
+            ))}
+          </div>
+
+          <div className="dashboard-grid">
+            <ActivityTable
+              title="Recent Imaging Activity"
+              subtitle="Latest change events reported by Orthanc"
+              rows={imagingRows}
+              emptyMessage="No recent imaging activity was returned by Orthanc."
+              columns={[
+                { label: 'Time', className: 'mono nowrap', render: (row) => formatOrthancTimestamp(row.timestamp) },
+                { label: 'Event', render: (row) => formatValue(row.type) },
+                { label: 'Resource', render: (row) => formatValue(row.resourceType) },
+                { label: 'Identifier', className: 'mono truncate', render: (row) => formatValue(row.id) },
+              ]}
+            />
+            <AuditTimeline rows={auditRows} />
+          </div>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+
+========================================
+FILE: client\src\pages\CompareScans.jsx
+========================================
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import api from '../api/client.js';
+import EmptyState from '../components/EmptyState.jsx';
+import ErrorMessage from '../components/ErrorMessage.jsx';
+import LoadingState from '../components/LoadingState.jsx';
+import { CompareIcon, ImageIcon, SearchIcon } from '../components/Icons.jsx';
+import { formatDicomDate, formatStudyModalities, formatValue } from '../utils/format.js';
+
+const comparisonGroups = [
+  {
+    title: 'Study',
+    fields: [
+      { label: 'Study Date', getValue: (profile) => profile?.studyDate },
+      { label: 'Modality', getValue: (profile) => profile?.primarySeries?.modality },
+      { label: 'Study Description', getValue: (profile) => profile?.studyDescription },
+      { label: 'Series Description', getValue: (profile) => profile?.primarySeries?.seriesDescription },
+      { label: 'Patient ID', getValue: (profile) => profile?.patientId },
+      { label: 'Study ID', getValue: (profile) => profile?.studyId },
+      { label: 'Series Number', getValue: (profile) => profile?.primarySeries?.seriesNumber },
+      { label: 'Series Count', getValue: (profile) => profile?.seriesCount },
+    ],
+  },
+  {
+    title: 'Acquisition Parameters',
+    fields: [
+      { label: 'Slice Thickness', getValue: (profile) => profile?.primaryInstance?.sliceThickness },
+      { label: 'kVp', getValue: (profile) => profile?.primaryInstance?.kvp },
+      { label: 'Tube Current / mA', getValue: (profile) => profile?.primaryInstance?.tubeCurrent },
+      { label: 'Reconstruction Algorithm', getValue: (profile) => profile?.primaryInstance?.reconstructionAlgorithm },
+    ],
+  },
+  {
+    title: 'Exposure Indicators',
+    fields: [
+      { label: 'Exposure Index (EI)', getValue: (profile) => profile?.primaryInstance?.exposureIndex },
+      { label: 'Target Exposure Index (EIT)', getValue: (profile) => profile?.primaryInstance?.targetExposureIndex },
+      { label: 'Deviation Index (DI)', getValue: (profile) => profile?.primaryInstance?.deviationIndex },
+    ],
+  },
+];
+
+function isDifferent(left, right) {
+  const a = formatValue(left, '');
+  const b = formatValue(right, '');
+  return a !== '' && b !== '' && a !== b;
+}
+
+function StudyOption({ study }) {
+  return (
+    <option value={study.id}>
+      {formatDicomDate(study.studyDate)} | {formatValue(study.studyDescription)} | {formatValue(study.patientId)}
+    </option>
+  );
+}
+
+function StudyViewport({ label, profile }) {
+  return (
+    <article className="viewport">
+      <header className="viewport-header">
+        <span className="viewport-label">{label}</span>
+        <span className="viewport-title">{profile ? formatValue(profile.studyDescription) : 'No study loaded'}</span>
+      </header>
+      <div className="viewport-canvas">
+        {profile ? (
+          <>
+            <div className="viewport-overlay top-left">
+              <span>ID: {formatValue(profile.patientId)}</span>
+              <span>Study: {formatValue(profile.studyId)}</span>
+            </div>
+            <div className="viewport-overlay top-right">
+              <span>{formatDicomDate(profile.studyDate)}</span>
+              <span>{formatStudyModalities(profile.modalitiesInStudy)}</span>
+            </div>
+            <div className="viewport-overlay bottom-left">
+              <span>{formatValue(profile.primarySeries?.seriesDescription)}</span>
+            </div>
+          </>
+        ) : null}
+        <div className="viewport-placeholder">
+          <ImageIcon size={30} />
+          <span>{profile ? 'Image rendering not available — metadata only' : 'Select a study to load'}</span>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+export default function CompareScans() {
+  const [studies, setStudies] = useState([]);
+  const [selectedLeft, setSelectedLeft] = useState('');
+  const [selectedRight, setSelectedRight] = useState('');
+  const [comparison, setComparison] = useState(null);
+  const [loadingStudies, setLoadingStudies] = useState(true);
+  const [loadingComparison, setLoadingComparison] = useState(false);
+  const [error, setError] = useState('');
+  const [studySearch, setStudySearch] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadStudies() {
+      setLoadingStudies(true);
+      setError('');
+      try {
+        const response = await api.get('/compare/studies');
+        if (!cancelled) {
+          setStudies(response.data.studies || []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.response?.data?.error || 'Unable to load studies for comparison.');
+          setStudies([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingStudies(false);
+        }
+      }
+    }
+
+    loadStudies();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filteredStudies = useMemo(() => {
+    const needle = studySearch.trim().toLowerCase();
+    if (!needle) {
+      return studies;
+    }
+
+    return studies.filter((study) =>
+      [study.studyDate, study.studyDescription, study.patientId, study.studyId, study.modalitiesInStudy]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(needle)),
+    );
+  }, [studySearch, studies]);
+
+  async function handleCompare() {
+    if (!selectedLeft || !selectedRight || selectedLeft === selectedRight) {
+      setError('Select two different studies to compare.');
+      return;
+    }
+
+    setLoadingComparison(true);
+    setError('');
+    try {
+      const response = await api.get('/compare/compare', {
+        params: {
+          leftStudyId: selectedLeft,
+          rightStudyId: selectedRight,
+        },
+      });
+      setComparison(response.data.comparison);
+    } catch (err) {
+      setComparison(null);
+      setError(err.response?.data?.error || 'Unable to compare the selected studies.');
+    } finally {
+      setLoadingComparison(false);
+    }
+  }
+
+  const leftProfile = comparison?.left;
+  const rightProfile = comparison?.right;
+
+  return (
+    <section className="page">
+      {loadingStudies ? <LoadingState message="Loading available studies..." /> : null}
+      <ErrorMessage message={error} />
+
+      <section className="panel">
+        <div className="panel-header">
+          <div className="section-heading">
+            <h3>Study Selection</h3>
+            <p>{studies.length} studies available from Orthanc</p>
+          </div>
+        </div>
+        <div className="toolbar comparison-controls">
+          <div className="field inline-field">
+            <label htmlFor="study-search">Search studies</label>
+            <div className="input-icon">
+              <SearchIcon size={16} />
+              <input
+                id="study-search"
+                value={studySearch}
+                onChange={(event) => setStudySearch(event.target.value)}
+                placeholder="Date, description or patient ID"
+              />
+            </div>
+          </div>
+          <div className="field inline-field">
+            <label htmlFor="left-study">
+              <span className="series-tag">A</span> First study
+            </label>
+            <select id="left-study" value={selectedLeft} onChange={(event) => setSelectedLeft(event.target.value)}>
+              <option value="">Select a study</option>
+              {filteredStudies.map((study) => (
+                <StudyOption key={study.id} study={study} />
+              ))}
+            </select>
+          </div>
+          <div className="field inline-field">
+            <label htmlFor="right-study">
+              <span className="series-tag">B</span> Second study
+            </label>
+            <select id="right-study" value={selectedRight} onChange={(event) => setSelectedRight(event.target.value)}>
+              <option value="">Select a study</option>
+              {filteredStudies.map((study) => (
+                <StudyOption key={study.id} study={study} />
+              ))}
+            </select>
+          </div>
+          <button type="button" className="primary-button" onClick={handleCompare} disabled={loadingComparison}>
+            <CompareIcon size={16} />
+            <span>{loadingComparison ? 'Comparing...' : 'Compare Studies'}</span>
+          </button>
+        </div>
+      </section>
+
+      <div className="viewport-grid">
+        <StudyViewport label="A" profile={leftProfile} />
+        <StudyViewport label="B" profile={rightProfile} />
+      </div>
+
+      {comparison ? (
+        <section className="panel">
+          <div className="panel-header">
+            <div className="section-heading">
+              <h3>Metadata Comparison</h3>
+              <p>No clinical conclusion is generated. Missing values are shown as unavailable.</p>
+            </div>
+            <span className="legend">
+              <span className="diff-chip">Differs</span> Values differ between studies
+            </span>
+          </div>
+          <div className="table-wrap flush">
+            <table className="data-table comparison-table">
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>
+                    <span className="series-tag">A</span> Study A
+                  </th>
+                  <th>
+                    <span className="series-tag">B</span> Study B
+                  </th>
+                  <th className="diff-col" aria-label="Difference" />
+                </tr>
+              </thead>
+              <tbody>
+                {comparisonGroups.map((group) => (
+                  <Fragment key={group.title}>
+                    <tr className="group-row">
+                      <th colSpan={4} scope="colgroup">
+                        {group.title}
+                      </th>
+                    </tr>
+                    {group.fields.map((field) => {
+                      const left = field.getValue(leftProfile);
+                      const right = field.getValue(rightProfile);
+                      const differs = isDifferent(left, right);
+                      return (
+                        <tr key={field.label} className={differs ? 'row-diff' : undefined}>
+                          <th scope="row">{field.label}</th>
+                          <td>{formatValue(left)}</td>
+                          <td>{formatValue(right)}</td>
+                          <td className="diff-col">{differs ? <span className="diff-chip">Differs</span> : null}</td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : (
+        <EmptyState
+          title="No comparison loaded"
+          message="Select two studies, then run the comparison to review side-by-side metadata."
+        />
+      )}
+    </section>
+  );
+}
+
+
+
+========================================
+FILE: client\src\pages\NotificationsPage.jsx
+========================================
+
+
+========================================
+FILE: client\src\api\client.js
+========================================
+import axios from 'axios';
+
+const api = axios.create({
+  baseURL: '/api',
+  timeout: 30000,
+});
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('orthoviewplus_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+export default api;
+
+
+========================================
+FILE: client\package.json
+========================================
+{
+  "name": "orthoviewplus-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.8.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
+    "vite": "^6.3.3"
+  }
+}
+
+
+========================================
+FILE: server\package.json
+========================================
+{
+  "name": "orthoviewplus-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+
+  "scripts": {
+  "start": "node src/index.js",
+  "dev": "node --watch src/index.js",
+  "test": "node --test"
+},
+  "dependencies": {
+    "axios": "^1.8.4",
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^11.9.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "form-data": "^4.0.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
+
+
+========================================
+FILE: ai-service\app\processing\io_utils.py
+========================================
+from __future__ import annotations
+
+import io
+from typing import Any
+
+import cv2
+import numpy as np
+from PIL import Image
+
+try:
+    import pydicom
+except ImportError:  # pragma: no cover
+    pydicom = None
+
+
+def decode_upload(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
+    """Decode DICOM bytes or a standard image into an 8-bit grayscale array."""
+    metadata: dict[str, Any] = {"format": "image"}
+    if pydicom is not None:
+        try:
+            dataset = pydicom.dcmread(io.BytesIO(data), force=True)
+            if hasattr(dataset, "pixel_array"):
+                pixels = dataset.pixel_array.astype(np.float32)
+                slope = float(getattr(dataset, "RescaleSlope", 1) or 1)
+                intercept = float(getattr(dataset, "RescaleIntercept", 0) or 0)
+                pixels = pixels * slope + intercept
+                display = _window_array(pixels, dataset)
+                metadata = {
+                    "format": "dicom",
+                    "patient_id": str(getattr(dataset, "PatientID", "") or ""),
+                    "study_date": str(getattr(dataset, "StudyDate", "") or ""),
+                    "modality": str(getattr(dataset, "Modality", "") or ""),
+                    "sop_instance_uid": str(getattr(dataset, "SOPInstanceUID", "") or ""),
+                    "study_instance_uid": str(getattr(dataset, "StudyInstanceUID", "") or ""),
+                    "rows": int(display.shape[0]),
+                    "columns": int(display.shape[1]),
+                    "photometric": str(getattr(dataset, "PhotometricInterpretation", "") or ""),
+                }
+                return display, metadata
+        except Exception:
+            pass
+
+    encoded = np.frombuffer(data, dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        pil = Image.open(io.BytesIO(data)).convert("L")
+        image = np.array(pil)
+    metadata["rows"] = int(image.shape[0])
+    metadata["columns"] = int(image.shape[1])
+    return image, metadata
+
+
+def _window_array(pixels: np.ndarray, dataset) -> np.ndarray:
+    center = getattr(dataset, "WindowCenter", None)
+    width = getattr(dataset, "WindowWidth", None)
+    if center is not None and width is not None:
+        try:
+            center = float(center[0] if hasattr(center, "__iter__") else center)
+            width = float(width[0] if hasattr(width, "__iter__") else width)
+            low = center - width / 2.0
+            high = center + width / 2.0
+            scaled = np.clip((pixels - low) / max(high - low, 1e-6), 0, 1)
+            return (scaled * 255).astype(np.uint8)
+        except Exception:
+            pass
+    low, high = np.percentile(pixels, (1, 99))
+    scaled = np.clip((pixels - low) / max(high - low, 1e-6), 0, 1)
+    return (scaled * 255).astype(np.uint8)
+
+
+def encode_png(image: np.ndarray) -> bytes:
+    if image.ndim == 2:
+        ok, buffer = cv2.imencode(".png", image)
+    else:
+        ok, buffer = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    if not ok:
+        raise ValueError("Unable to encode PNG output.")
+    return buffer.tobytes()
+
+
+def to_base64(image: np.ndarray) -> str:
+    import base64
+
+    return base64.b64encode(encode_png(image)).decode("ascii")
+
+
+def overlay_mask(base: np.ndarray, mask: np.ndarray, color=(220, 70, 70), alpha=0.45) -> np.ndarray:
+    rgb = cv2.cvtColor(base, cv2.COLOR_GRAY2RGB)
+    tint = np.zeros_like(rgb)
+    tint[:, :] = color
+    binary = (mask > 0).astype(np.uint8)
+    for channel in range(3):
+        rgb[:, :, channel] = np.where(
+            binary == 1,
+            (alpha * tint[:, :, channel] + (1 - alpha) * rgb[:, :, channel]).astype(np.uint8),
+            rgb[:, :, channel],
+        )
+    return rgb
+
+
+========================================
+FILE: ai-service\README.md
+========================================
+# OrthoView+ AI service
+
+Python FastAPI service for assistive image processing. It does not diagnose patients or overwrite original DICOM files.
+
+## Run (Windows PowerShell)
+
+```powershell
+cd ai-service
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+pytest
+```
+
+The Node.js backend is the only intended client.
