@@ -10,3 +10,9 @@ data/
 *.db-shm
 .vscode/
 .idea/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node_modules/
