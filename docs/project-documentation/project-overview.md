@@ -1,66 +1,35 @@
 # OrthoView+ Project Overview
 
-## 1. Project Title
+## Project
 
-A Web-based Clinical Interface for Enhancing Medical Imaging Workflows among Healthcare Practitioners
+OrthoView+ is an academic, web-based clinical interface for imaging workflow coordination around Orthanc. It combines React/Vite, an Express API, SQLite application records, Orthanc-managed DICOM resources, and a Python FastAPI service containing experimental image-processing prototypes.
 
-## 2. Introduction
+## Purpose and scope
 
-OrthoView+ is a web-based application designed to improve how healthcare practitioners interact with medical imaging workflow information. It provides a dedicated interface that works with an Orthanc imaging server through its REST API.
+The project provides role-specific patient, request, study, reporting, scheduling, notification and administrative workflows. It is not a PACS replacement or diagnostic system. Orthanc remains the DICOM source of truth; SQLite contains application metadata and explicit links to Orthanc resources.
 
-The project aims to organize imaging-related information and provide relevant monitoring and administrative functions through a role-based interface.
+## Intended roles
 
-## 3. Problem Statement
+- **Administrator:** account and patient management, identity mapping, exact study/request linking, scheduling, operational monitoring, alerts and audit review.
+- **Practitioner:** permitted patient registration and lookup, requests, appointments, relevant history, authorized study/report review, exposure information, comparison and notifications.
+- **Radiologist:** assigned requests and studies, DICOM review, same-patient authorized comparison, radiology reports, and radiologist-only experimental AI processing/result review.
 
-Medical imaging workflows involve interacting with imaging studies, exposure information, system activity, and related operational details. A focused interface can help organize these tasks and make relevant information easier to access.
+## Identity and imaging workflow
 
-OrthoView+ explores how a web-based interface can support these workflows without replacing the underlying imaging server.
+An application patient is distinct from a DICOM PatientID. An administrator creates a pending mapping, verifies it manually, and links the exact Orthanc study to an imaging request for the same internal patient. Radiologist study access depends on assignment to that request; a patient's existence or a requester's ownership alone does not grant study access. A matching patient name does not automatically verify identity.
 
-## 4. Project Objectives
+## Experimental processing
 
-The project aims to:
+Seven assistive prototypes are in scope: restoration, completeness assessment, longitudinal comparison, anatomical reconstruction, 3D visualization, synthetic phantom generation, and complementary-view synthesis. Similar-case retrieval is excluded. These capabilities use classical image-processing algorithms (OpenCV, NumPy, scikit-image) and procedural synthetic phantom generation, not trained predictive AI models. Synthetic/derived outputs are labelled, reviewed by a radiologist, and not claimed as clinical or diagnostic results.
 
-* Develop a web-based interface for imaging workflow information.
-* Integrate with Orthanc through its REST API.
-* Present relevant exposure information for supported imaging studies.
-* Provide scan comparison interfaces for selected imaging metadata.
-* Support system monitoring and audit logging.
-* Separate practitioner and administrator functions.
-* Evaluate usability with a small group of healthcare practitioners.
+## Technology
 
-## 5. Intended Users
+- Frontend: React and Vite.
+- API: Node.js and Express.
+- Database: SQLite and better-sqlite3.
+- Imaging archive: Orthanc REST API.
+- Processing service: Python FastAPI.
 
-### Healthcare Practitioners
+## Evaluation and limitations
 
-The practitioner workspace is intended to provide access to clinical imaging workflow features, including study information, exposure information, scan comparison, and personal activity where implemented.
-
-### System Administrators
-
-The administrator workspace is intended to support user management, audit review, system monitoring, and other administrative functions as implemented.
-
-## 6. Technology Stack
-
-* Frontend: React and Vite.
-* Backend: Node.js and Express.
-* Application database: SQLite.
-* Database library: better-sqlite3.
-* Imaging server: Orthanc.
-* Backend communication with Orthanc: REST API.
-* Version control: Git and GitHub.
-* Development environment: Visual Studio Code.
-
-## 7. Scope
-
-The project focuses on the interface and workflow layer around an Orthanc imaging server. It does not aim to replace the imaging server or provide AI-based diagnosis.
-
-Development and demonstration should use suitable sample imaging data rather than unauthorized real patient data.
-
-## 8. Development Approach
-
-The project follows an iterative and incremental development approach. The application is developed in stages, with functionality tested and refined as the system evolves.
-
-## 9. Evaluation
-
-The planned usability evaluation uses the System Usability Scale (SUS) with approximately three to five healthcare practitioners, subject to participant availability and approval.
-
-Evaluation activities and results should be documented only when they have actually taken place.
+Usability evaluation with healthcare practitioners and the System Usability Scale (SUS) is planned, not completed or evidenced here. No clinical validation, diagnostic accuracy evaluation, or production hospital deployment is claimed. See [testing](./testing.md) for automated verification and service-integration limitations.

@@ -35,6 +35,10 @@ export default function AiResultView({ result }) {
     <article className="ai-result-card">
       <h4>{result.label} · {result.reviewStatus === 'reviewed' ? 'Reviewed' : 'Pending review'}</h4>
       {metadata.synthetic ? <p className="synthetic-banner">SYNTHETIC OUTPUT — NOT A PATIENT EXAMINATION</p> : null}
+      {metadata.experimental ? <p className="synthetic-banner">EXPERIMENTAL OUTPUT — REQUIRES RADIOLOGIST REVIEW</p> : null}
+      {result.resultKind?.endsWith('_rejected') || result.resultKind?.endsWith('_failed')
+        ? <p role="status">Processing did not produce an accepted result. Review the warnings below.</p>
+        : null}
       {result.resultKind === 'anatomical_3d' && result.fileUrl
         ? <MeshViewer url={apiUrl(result.fileUrl)} label={result.label} />
         : result.fileUrl ? <AuthorizedImage url={apiUrl(result.fileUrl)} label={result.label} /> : null}

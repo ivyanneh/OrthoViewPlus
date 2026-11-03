@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import api from '../api/client.js';
+import DicomViewer from '../components/DicomViewer.jsx';
 import EmptyState from '../components/EmptyState.jsx';
 import ErrorMessage from '../components/ErrorMessage.jsx';
 import LoadingState from '../components/LoadingState.jsx';
-import { CompareIcon, ImageIcon, SearchIcon } from '../components/Icons.jsx';
-import { formatDicomDate, formatStudyModalities, formatValue } from '../utils/format.js';
+import { CompareIcon, SearchIcon } from '../components/Icons.jsx';
+import { formatDicomDate, formatValue } from '../utils/format.js';
 
 const comparisonGroups = [
   {
@@ -53,43 +54,15 @@ function StudyOption({ study }) {
   );
 }
 
-function StudyViewport({ label, profile }) {
-  return (
-    <article className="viewport">
-      <header className="viewport-header">
-        <span className="viewport-label">{label}</span>
-        <span className="viewport-title">{profile ? formatValue(profile.studyDescription) : 'No study loaded'}</span>
-      </header>
-      <div className="viewport-canvas">
-        {profile ? (
-          <>
-            <div className="viewport-overlay top-left">
-              <span>ID: {formatValue(profile.patientId)}</span>
-              <span>Study: {formatValue(profile.studyId)}</span>
-            </div>
-            <div className="viewport-overlay top-right">
-              <span>{formatDicomDate(profile.studyDate)}</span>
-              <span>{formatStudyModalities(profile.modalitiesInStudy)}</span>
-            </div>
-            <div className="viewport-overlay bottom-left">
-              <span>{formatValue(profile.primarySeries?.seriesDescription)}</span>
-            </div>
-          </>
-        ) : null}
-        <div className="viewport-placeholder">
-          <ImageIcon size={30} />
-          <span>{profile ? 'Image rendering not available — metadata only' : 'Select a study to load'}</span>
-        </div>
-      </div>
-    </article>
-  );
-}
-
 export default function CompareScans() {
   const [studies, setStudies] = useState([]);
   const [selectedLeft, setSelectedLeft] = useState('');
   const [selectedRight, setSelectedRight] = useState('');
   const [comparison, setComparison] = useState(null);
+  const [leftImageStudy, setLeftImageStudy] = useState(null);
+  const [rightImageStudy, setRightImageStudy] = useState(null);
+  const [leftSeriesId, setLeftSeriesId] = useState('');
+  const [rightSeriesId, setRightSeriesId] = useState('');
   const [loadingStudies, setLoadingStudies] = useState(true);
   const [loadingComparison, setLoadingComparison] = useState(false);
   const [error, setError] = useState('');
@@ -152,9 +125,19 @@ export default function CompareScans() {
           rightStudyId: selectedRight,
         },
       });
+      const [leftDetails, rightDetails] = await Promise.all([
+        api.get(`/imaging/studies/${encodeURIComponent(selectedLeft)}`),
+        api.get(`/imaging/studies/${encodeURIComponent(selectedRight)}`),
+      ]);
       setComparison(response.data.comparison);
+      setLeftImageStudy(leftDetails.data);
+      setRightImageStudy(rightDetails.data);
+      setLeftSeriesId(leftDetails.data.series?.[0]?.id || '');
+      setRightSeriesId(rightDetails.data.series?.[0]?.id || '');
     } catch (err) {
       setComparison(null);
+      setLeftImageStudy(null);
+      setRightImageStudy(null);
       setError(err.response?.data?.error || 'Unable to compare the selected studies.');
     } finally {
       setLoadingComparison(false);
@@ -218,70 +201,78 @@ export default function CompareScans() {
         </div>
       </section>
 
-      <div className="viewport-grid">
-        <StudyViewport label="A" profile={leftProfile} />
-        <StudyViewport label="B" profile={rightProfile} />
-      </div>
-
       {comparison ? (
-        <section className="panel">
-          <div className="panel-header">
-            <div className="section-heading">
-              <h3>Metadata Comparison</h3>
-              <p>No clinical conclusion is generated. Missing values are shown as unavailable.</p>
+        <>
+          <div className="comparison-image-grid">
+            <section aria-label="Study A image">
+              <h3><span className="series-tag">A</span> Study A · {formatValue(leftProfile?.studyDescription)}</h3>
+              <DicomViewer
+                study={studies.find((study) => study.id === selectedLeft)}
+                profile={leftImageStudy}
+                seriesId={leftSeriesId}
+                onSeriesChange={setLeftSeriesId}
+              />
+            </section>
+            <section aria-label="Study B image">
+              <h3><span className="series-tag">B</span> Study B · {formatValue(rightProfile?.studyDescription)}</h3>
+              <DicomViewer
+                study={studies.find((study) => study.id === selectedRight)}
+                profile={rightImageStudy}
+                seriesId={rightSeriesId}
+                onSeriesChange={setRightSeriesId}
+              />
+            </section>
+          </div>
+          <section className="panel">
+            <div className="panel-header">
+              <div className="section-heading">
+                <h3>Metadata Comparison</h3>
+                <p>Image and metadata differences are descriptive only; no clinical conclusion or diagnosis is generated.</p>
+              </div>
+              <span className="legend">
+                <span className="diff-chip">Differs</span> Values differ between studies
+              </span>
             </div>
-            <span className="legend">
-              <span className="diff-chip">Differs</span> Values differ between studies
-            </span>
-          </div>
-          <div className="table-wrap flush">
-            <table className="data-table comparison-table">
-              <thead>
-                <tr>
-                  <th>Field</th>
-                  <th>
-                    <span className="series-tag">A</span> Study A
-                  </th>
-                  <th>
-                    <span className="series-tag">B</span> Study B
-                  </th>
-                  <th className="diff-col" aria-label="Difference" />
-                </tr>
-              </thead>
-              <tbody>
-                {comparisonGroups.map((group) => (
-                  <Fragment key={group.title}>
-                    <tr className="group-row">
-                      <th colSpan={4} scope="colgroup">
-                        {group.title}
-                      </th>
-                    </tr>
-                    {group.fields.map((field) => {
-                      const left = field.getValue(leftProfile);
-                      const right = field.getValue(rightProfile);
-                      const differs = isDifferent(left, right);
-                      return (
-                        <tr key={field.label} className={differs ? 'row-diff' : undefined}>
-                          <th scope="row">{field.label}</th>
-                          <td>{formatValue(left)}</td>
-                          <td>{formatValue(right)}</td>
-                          <td className="diff-col">{differs ? <span className="diff-chip">Differs</span> : null}</td>
-                        </tr>
-                      );
-                    })}
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+            <div className="table-wrap flush">
+              <table className="data-table comparison-table">
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th><span className="series-tag">A</span> Study A</th>
+                    <th><span className="series-tag">B</span> Study B</th>
+                    <th className="diff-col" aria-label="Difference" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {comparisonGroups.map((group) => (
+                    <Fragment key={group.title}>
+                      <tr className="group-row"><th colSpan={4} scope="colgroup">{group.title}</th></tr>
+                      {group.fields.map((field) => {
+                        const left = field.getValue(leftProfile);
+                        const right = field.getValue(rightProfile);
+                        const differs = isDifferent(left, right);
+                        return (
+                          <tr key={field.label} className={differs ? 'row-diff' : undefined}>
+                            <th scope="row">{field.label}</th>
+                            <td>{formatValue(left)}</td>
+                            <td>{formatValue(right)}</td>
+                            <td className="diff-col">{differs ? <span className="diff-chip">Differs</span> : null}</td>
+                          </tr>
+                        );
+                      })}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
       ) : (
         <EmptyState
           title="No comparison loaded"
-          message="Select two studies, then run the comparison to review side-by-side metadata."
+          message="Select two studies for the same verified patient, then run the comparison to load both authorized image series and metadata."
         />
       )}
     </section>
   );
 }
-

@@ -22,18 +22,65 @@ export function createClinicalRouter({
     });
   }
 
+  function requirePractitionerPatientAccess(req, patientId) {
+    const patient = patients.requirePatient(patientId);
+    if (req.user.role !== 'practitioner') return patient;
+
+    const ownsPatient = patient.createdBy === req.user.username;
+    const hasRequest = requests.list({
+      patientId: patient.id,
+      requestedBy: req.user.id,
+      limit: 500,
+    }).length > 0;
+    const hasAppointment = appointments.list({
+      patientId: patient.id,
+      accessibleToUserId: req.user.id,
+      limit: 500,
+    }).length > 0;
+    if (!ownsPatient && !hasRequest && !hasAppointment) {
+      throw new AppError('Patient records are available only for patients in your clinical workflow.', 403);
+    }
+    return patient;
+  }
+
   router.get(
     '/patients',
     handleRoute((req, res) => {
-      res.json({ patients: patients.search({ query: req.query.q, status: req.query.status || 'active' }) });
+      let patientList = patients.search({
+        query: req.query.q,
+        status: req.query.status || 'active',
+        limit: req.query.limit,
+      });
+      if (req.user.role === 'radiologist') {
+        const assignedPatientIds = new Set(
+          requests.list({
+            assignedRadiologistId: req.user.id,
+            assignedRadiologistOnly: true,
+            limit: 500,
+          }).map((request) => Number(request.patientId)),
+        );
+        patientList = patientList.filter((patient) => assignedPatientIds.has(Number(patient.id)));
+      } else if (req.user.role === 'administrator') {
+        throw new AppError('Use the administrator patient-management workflow for patient records.', 403);
+      }
+      if (req.user.role === 'practitioner') {
+        const accessiblePatientIds = new Set([
+          ...requests.list({ requestedBy: req.user.id, limit: 500 }).map((request) => Number(request.patientId)),
+          ...appointments.list({ accessibleToUserId: req.user.id, limit: 500 }).map((appointment) => Number(appointment.patientId)),
+        ]);
+        patientList = patientList.filter(
+          (patient) => accessiblePatientIds.has(Number(patient.id)) || patient.createdBy === req.user.username,
+        );
+      }
+      res.json({ patients: patientList });
     }),
   );
 
   router.post(
     '/patients',
     handleRoute((req, res) => {
-      if (!['administrator', 'practitioner'].includes(req.user.role)) {
-        return res.status(403).json({ error: 'You do not have permission to register patients.' });
+      if (req.user.role !== 'practitioner') {
+        return res.status(403).json({ error: 'Only practitioners can register patients through clinical workflow.' });
       }
       const patient = patients.create({ ...req.body, createdBy: req.user.id });
       log(req, 'patient_create', `patient:${patient.id}`, `registered patient ${patient.mrn}.`);
@@ -44,8 +91,14 @@ export function createClinicalRouter({
   router.get(
     '/patients/:id',
     handleRoute((req, res) => {
+      if (req.user.role === 'administrator') {
+        throw new AppError('Administrators do not have access to clinical patient history.', 403);
+      }
       const patient = patients.requirePatient(req.params.id);
       let authorizedRequest = null;
+      if (req.user.role === 'practitioner') {
+        requirePractitionerPatientAccess(req, patient.id);
+      }
       if (req.user.role === 'radiologist') {
         authorizedRequest = requests.get(req.query.requestId);
         if (
@@ -76,6 +129,24 @@ export function createClinicalRouter({
         patientAppointments = patientAppointments.filter((appointment) =>
           Number(appointment.id) === Number(authorizedRequest?.appointmentId),
         );
+      } else if (req.user.role === 'practitioner') {
+        patientStudies = patientStudies.filter((study) =>
+          studies.isAssignedToPractitioner(study.orthancStudyId, req.user.id),
+        );
+        const studyIds = new Set(patientStudies.map((study) => Number(study.id)));
+        patientReports = patientReports.filter(
+          (report) => report.imagingStudyId && studyIds.has(Number(report.imagingStudyId)),
+        );
+        patientRequests = requests.list({
+          patientId: patient.id,
+          requestedBy: req.user.id,
+          limit: 500,
+        });
+        patientAppointments = appointments.list({
+          patientId: patient.id,
+          accessibleToUserId: req.user.id,
+          limit: 500,
+        });
       }
       const history = {
         appointments: patientAppointments,
@@ -103,14 +174,24 @@ export function createClinicalRouter({
   router.get(
     '/appointments',
     handleRoute((req, res) => {
+      const filters = {
+        status: req.query.status,
+        dateFrom: req.query.dateFrom,
+        dateTo: req.query.dateTo,
+        patientId: req.query.patientId,
+      };
+      if (req.user.role === 'practitioner') {
+        filters.accessibleToUserId = req.user.id;
+      } else if (req.user.role === 'radiologist') {
+        filters.appointmentIds = requests.list({
+          assignedRadiologistId: req.user.id,
+          assignedRadiologistOnly: true,
+          limit: 500,
+        }).map((request) => request.appointmentId).filter(Boolean);
+      }
       res.json({
-        appointments: appointments.list({
-          status: req.query.status,
-          dateFrom: req.query.dateFrom,
-          dateTo: req.query.dateTo,
-          patientId: req.query.patientId,
-        }),
-        counts: appointments.counts(),
+        appointments: appointments.list(filters),
+        counts: req.user.role === 'administrator' ? appointments.counts() : undefined,
       });
     }),
   );
@@ -121,10 +202,19 @@ export function createClinicalRouter({
       if (req.user.role !== 'administrator' && req.user.role !== 'practitioner') {
         return res.status(403).json({ error: 'You do not have permission to schedule appointments.' });
       }
+      if (req.user.role === 'practitioner') {
+        requirePractitionerPatientAccess(req, req.body?.patientId);
+      }
+      if (req.body?.assignedUserId) {
+        const assignee = users.get(req.body.assignedUserId);
+        if (!assignee || assignee.role !== 'practitioner' || assignee.status !== 'active') {
+          throw new AppError('Appointments may only be assigned to an active practitioner.', 400);
+        }
+      }
       const appointment = appointments.create({
         ...req.body,
         createdBy: req.user.id,
-        requestedBy: req.body.requestedBy || req.user.id,
+        requestedBy: req.user.role === 'practitioner' ? req.user.id : req.body.requestedBy || req.user.id,
       });
       log(req, 'appointment_create', `appointment:${appointment.id}`, `scheduled ${appointment.examination}.`);
       res.status(201).json({ appointment });
@@ -159,7 +249,14 @@ export function createClinicalRouter({
       } else if (req.user.role === 'radiologist') {
         filters.assignedRadiologistId = req.user.id;
       }
-      res.json({ requests: requests.list(filters) });
+      let result = requests.list(filters);
+      if (req.user.role === 'radiologist' && req.query.mine !== 'true') {
+        result = result.filter((request) =>
+          Number(request.assignedRadiologistId) === Number(req.user.id) ||
+          ['submitted', 'scheduled'].includes(request.status),
+        );
+      }
+      res.json({ requests: result });
     }),
   );
 
@@ -168,6 +265,9 @@ export function createClinicalRouter({
     handleRoute((req, res) => {
       if (req.user.role !== 'practitioner' && req.user.role !== 'administrator') {
         return res.status(403).json({ error: 'You do not have permission to submit imaging requests.' });
+      }
+      if (req.user.role === 'practitioner') {
+        requirePractitionerPatientAccess(req, req.body?.patientId);
       }
       const request = requests.create({ ...req.body, requestedBy: req.user.id });
       log(req, 'imaging_request_create', `request:${request.id}`, `submitted imaging request ${request.examination}.`);
@@ -190,6 +290,9 @@ export function createClinicalRouter({
   router.get(
     '/reports',
     handleRoute((req, res) => {
+      if (req.user.role === 'administrator') {
+        throw new AppError('Radiology reports are not available to administrators.', 403);
+      }
       const filters = { patientId: req.query.patientId, status: req.query.status };
       if (req.user.role === 'practitioner') {
         filters.status = 'approved';
@@ -204,6 +307,12 @@ export function createClinicalRouter({
           report.imagingStudyId &&
           studies.isInternalStudyAssignedToRadiologist(report.imagingStudyId, req.user.id),
         );
+      } else if (req.user.role === 'practitioner') {
+        result = result.filter((report) => {
+          if (!report.imagingStudyId) return false;
+          const study = studies.get(report.imagingStudyId);
+          return study && studies.isAssignedToPractitioner(study.orthancStudyId, req.user.id);
+        });
       }
       res.json({ reports: result });
     }),
@@ -278,7 +387,11 @@ export function createClinicalRouter({
   router.post(
     '/notifications/:id/read',
     handleRoute((req, res) => {
-      res.json({ notification: notifications.markRead(req.params.id, req.user.id) });
+      const notification = notifications.markRead(req.params.id, req.user.id);
+      if (!notification) {
+        throw new AppError('Notification not found.', 404);
+      }
+      res.json({ notification });
     }),
   );
 

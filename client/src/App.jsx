@@ -15,8 +15,11 @@ import SystemAdministration from './pages/admin/SystemAdministration.jsx';
 import AdminProfile from './pages/admin/AdminProfile.jsx';
 import ImagingStudyManagement from './pages/admin/ImagingStudyManagement.jsx';
 import PatientManagement from './pages/admin/PatientManagement.jsx';
+import NotificationsPage from './pages/NotificationsPage.jsx';
+import PractitionerWorkspace from './pages/PractitionerWorkspace.jsx';
 import AdminRoute from './components/AdminRoute.jsx';
 import PractitionerRoute from './components/PractitionerRoute.jsx';
+import ClinicalRoute from './components/ClinicalRoute.jsx';
 import RadiologistRoute from './components/RadiologistRoute.jsx';
 import RadiologistDashboard from './pages/RadiologistDashboard.jsx';
 import { useAuth } from './context/AuthContext.jsx';
@@ -32,10 +35,13 @@ function HomeRedirect() {
 
 const practitionerPages = [
   ['/dashboard', <Dashboard />],
+  ['/clinical-workspace', <PractitionerWorkspace />],
+];
+
+const clinicalPages = [
   ['/exposure-index', <ExposureIndex />],
   ['/compare-scans', <CompareScans />],
 ];
-
 const radiologistPages = [
   ['/radiologist/dashboard', <RadiologistDashboard />],
 ];
@@ -65,8 +71,12 @@ export default function App() {
           </ProtectedRoute>
         }
       >
+        <Route path="/notifications" element={<NotificationsPage />} />
         {practitionerPages.map(([path, element]) => (
           <Route key={path} path={path} element={<PractitionerRoute>{element}</PractitionerRoute>} />
+        ))}
+        {clinicalPages.map(([path, element]) => (
+          <Route key={path} path={path} element={<ClinicalRoute>{element}</ClinicalRoute>} />
         ))}
         {radiologistPages.map(([path, element]) => (
           <Route key={path} path={path} element={<RadiologistRoute>{element}</RadiologistRoute>} />

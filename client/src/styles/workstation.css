@@ -693,6 +693,23 @@ a.topbar-user:hover strong {
   padding: 0.8rem 1rem;
 }
 
+.comparison-image-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 1rem;
+}
+
+.comparison-image-grid > section {
+  min-width: 0;
+}
+
+.comparison-image-grid > section > h3 {
+  margin: 0 0 0.5rem;
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
 .filter-bar .grow {
   flex: 1;
 }
@@ -2895,7 +2912,8 @@ a.topbar-user:hover strong {
 
 @media (max-width: 960px) {
   .viewer-stage,
-  .ai-split {
+  .ai-split,
+  .comparison-image-grid {
     grid-template-columns: 1fr;
   }
 

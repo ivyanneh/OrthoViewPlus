@@ -9,8 +9,8 @@ export default function PractitionerRoute({ children }) {
     return <LoadingState message="Checking access rights..." />;
   }
 
-  if (user?.role === 'administrator') {
-    return <Navigate to="/admin/dashboard" replace />;
+  if (user?.role !== 'practitioner') {
+    return <Navigate to={user?.role === 'administrator' ? '/admin/dashboard' : '/radiologist/dashboard'} replace />;
   }
 
   return children;

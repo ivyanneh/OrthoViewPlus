@@ -1,84 +1,36 @@
 # OrthoView+ System Requirements
 
-## 1. Functional Requirements
+## Functional requirements
 
-### FR-01: User Authentication
+### Identity, users and access
 
-The system shall allow authorized users to log in using their credentials.
+- **FR-01 Authentication:** users authenticate through the backend; protected API routes require a valid identity.
+- **FR-02 Three roles:** administrator, practitioner and radiologist receive distinct navigation and server-enforced permissions.
+- **FR-03 Administration:** administrators manage user accounts, restrictions, application patients, mappings, study/request links, schedules, alerts and audit records.
+- **FR-04 Patient management:** administrators can search, register, view, edit and archive/reactivate application patients; practitioners can register and search within permitted clinical workflows through a dedicated patient/request workspace.
+- **FR-05 DICOM identity:** administrators can refresh Orthanc, create pending mappings, verify/reject mappings explicitly, and link an exact study to a request for the same mapped patient.
+- **FR-05a Link integrity:** the selected request must have the same internal patient and a compatible modality; the administrator explicitly selects the exact request.
+- **FR-06 Request workflow:** practitioners submit imaging requests and schedule appointments; radiologists access/claim assigned requests and complete draft, approval and finalization workflows for reports.
+- **FR-07 Study access:** access to linked studies is checked against verified patient identity and exact request relationships. Radiologists require exact assignment; practitioner access follows request/appointment permissions.
+- **FR-08 Imaging:** authorized users can view supported study data and rendered images from Orthanc.
+- **FR-09 Exposure:** the application presents available exposure indicators for authorized linked studies when supported metadata exists.
+- **FR-10 Comparison:** authorized same-patient studies can be compared using image viewers and available acquisition metadata.
+- **FR-11 Notifications:** users can view and update their own notification read state.
+- **FR-12 AI prototypes:** radiologists can request supported bounded experimental processing for authorized studies and review labelled results. Similar-case retrieval is excluded.
+- **FR-13 Auditing and operations:** relevant workflow/access actions are audited; administrators can view operational monitoring and audit information.
 
-### FR-02: Role-Based Access
+## Non-functional requirements
 
-The system shall provide separate practitioner and administrator workspaces according to assigned roles.
+- **NFR-01 Security:** passwords are hashed; sensitive credentials remain backend-side; APIs enforce role, resource ownership, exact study assignment, verified mappings and patient consistency.
+- **NFR-02 Data integrity:** retain existing records; preserve patient/request/study relationships and completed AI results during recovery.
+- **NFR-03 Reliability:** input sizes and processing concurrency are bounded; errors are surfaced; retries and result insertion are controlled.
+- **NFR-04 Maintainability:** the React client, Express API, SQLite application data, Orthanc archive and FastAPI processing service have distinct responsibilities.
+- **NFR-05 Usability:** role-appropriate navigation, actionable validation and loading/error/empty states are provided.
 
-### FR-03: User Management
+## Scope and limitations
 
-The system shall allow authorized administrators to manage user accounts and applicable account restrictions.
+OrthoView+ is an academic workflow interface, not a PACS replacement or diagnostic system. The seven image-processing functions are experimental and not clinically validated. Results require radiologist review. The basic rendered DICOM viewer is not diagnostic-grade. No clinical deployment, diagnostic accuracy validation, or completed SUS evaluation is claimed.
 
-### FR-04: Imaging Study Information
+## Verification
 
-The system shall provide an interface for accessing supported imaging study information through the backend and Orthanc REST API.
-
-### FR-05: Exposure Information
-
-The system shall display available exposure-related information for supported CR/DX imaging studies when the required metadata is available.
-
-### FR-06: Scan Comparison
-
-The system shall provide an interface for comparing selected imaging metadata, such as acquisition parameters and examination dates, when those values are available.
-
-### FR-07: System Dashboard
-
-The system shall present relevant system statistics and monitoring information supported by the available backend data.
-
-### FR-08: Audit Logging
-
-The system shall record relevant user and administrative activities according to the implemented audit rules.
-
-### FR-09: Audit Log Access
-
-The system shall restrict access to administrative audit records according to user permissions.
-
-### FR-10: Imaging Schedule
-
-The administrator workspace is intended to support examination scheduling and relevant operational alerts, subject to the implemented functionality.
-
-### FR-11: Modality Monitoring
-
-The administrator workspace is intended to provide monitoring information for supported imaging modalities.
-
-## 2. Non-Functional Requirements
-
-### NFR-01: Security
-
-Passwords shall be stored as hashes, not plaintext. Sensitive backend credentials shall not be exposed to the frontend or committed to version control.
-
-### NFR-02: Usability
-
-The interface should provide clear navigation and distinguish practitioner functions from administrator functions.
-
-### NFR-03: Maintainability
-
-The application should separate frontend, backend, database, and imaging-server responsibilities.
-
-### NFR-04: Reliability
-
-The system should handle invalid input, failed requests, and unavailable backend services without exposing sensitive implementation details.
-
-### NFR-05: Data Integrity
-
-Application records should be stored consistently, and database changes should preserve the integrity of existing data.
-
-### NFR-06: Compatibility
-
-The web application should operate in a supported modern browser and in the configured development environment.
-
-## 3. Scope Limitations
-
-* The application is an imaging workflow interface, not an AI diagnostic tool.
-* Orthanc remains responsible for managing imaging resources.
-* Displayed metadata depends on the information available from Orthanc.
-* Features described as intended or planned must not be reported as completed until verified.
-
-## 4. Requirement Verification
-
-Each requirement should be checked against the implementation and documented test results. Requirements may be updated as the project evolves.
+Verification status for this pass is summarized in the final requirements checklist and documented test results in [testing.md](./testing.md). A rendered page or registered route alone is not proof of an end-to-end workflow; live Orthanc and clinical workflows must be separately marked when not exercised.

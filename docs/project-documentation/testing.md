@@ -1,89 +1,40 @@
-# OrthoView+ Testing Documentation
+# OrthoView+ Testing
 
-## 1. Purpose
+## Automated checks
 
-This document records the testing approach used to verify the OrthoView+ application.
+| Check | Command/environment | Result |
+|---|---|---|
+| Backend tests | `cd server; npm.cmd test` | **124 passed, 0 failed.** Includes role/resource authorization, workflow-scoped patient and appointment access, exact study assignment, patient mapping and registration, study linking, audit events, AI identity/limits/recovery/result-path safety, notifications, and Orthanc service behavior. |
+| AI-service tests | `cd ai-service; D:\OrthoViewPlus-AI\venv\Scripts\python.exe -m pytest` | **9 passed, 0 failed.** Includes processing behavior, malformed DICOM, geometry/modality validation and 200-slice bound. One upstream Starlette/AnyIO deprecation warning was emitted. |
+| Frontend production build | `cd client; npm.cmd run build` | **Passed.** Vite transformed 135 modules and produced the production bundle. |
+| Whitespace/error check | `git diff --check` | Passed on the final worktree. |
 
-## 2. Testing Areas
+These are automated checks, not clinical or usability evaluations. The backend tests use isolated SQLite fixtures and mocked Orthanc/AI services; Python tests use generated synthetic DICOM data. They do not prove access to a production archive, clinical correctness, diagnostic performance, or fitness for clinical use.
 
-### 2.1 Authentication
+## Security and workflow coverage
 
-Verify that:
+Automated regression coverage includes:
 
-* Authorized credentials allow login.
-* Invalid credentials are rejected.
-* Passwords are stored as hashes rather than plaintext.
-* Protected endpoints enforce authentication.
-* Logout behaves as expected.
+- Unassigned radiologists are denied access to another radiologist's exact study, including preview, rendered-image and tag routes; assigned radiologists retain access.
+- Practitioner and administrator study access follows their separate permissions.
+- Mapping verification and study linking require the exact verified internal patient/request relationship.
+- Study linking rejects requests for the same patient when request modality is incompatible with the Orthanc study.
+- AI creation derives identity from DICOM, rejects caller-supplied patient identity and mismatched source/prior resources, and enforces the instance ceiling for combined inputs.
+- Job/result, file/overlay, review and retry routes enforce exact study assignment; job listing is filtered by authorization.
+- Recovery does not recreate duplicate result rows or reprocess completed jobs; interrupted attempts have a bounded persisted retry policy.
+- Result-file traversal and symlink paths are rejected.
+- Patient-management tests cover administrator-only routes, search, duplicate MRNs, optional unknown demographics, audit events and preservation of pre-existing patients.
+- Notification ownership, read and read-all behavior are checked; approving a report notifies only the requesting practitioner.
+- Practitioner approved-report lists resolve each report to its linked study and expose only reports for studies in that practitioner's workflow.
+- Recent audit details are returned only to administrators.
+- Exposure and comparison are scoped to linked, verified, role-accessible studies.
 
-### 2.2 Role-Based Authorization
+## Live-service verification
 
-Verify that:
+The authorized Administrator workflow linked Orthanc study `f11cb78c-7d84408b-8af8b958-9ee2b8e8-602f7b9d` (application study ID 1) to imaging request 2 after checking the verified mapping `Ultra_fast_Brain` → `DEMO-IVY-TEST-003` and confirming the patient and MR modality. The saved link was retrieved through the application and independently confirmed in SQLite. No patient or request was created or changed for this operation. This link is an intentional live-data change specifically authorized by the user; unrelated records were not modified.
 
-* Practitioner accounts receive the appropriate practitioner permissions.
-* Administrator accounts receive the appropriate administrative permissions.
-* Unauthorized users cannot access restricted endpoints.
-* Administrative operations require appropriate authorization.
+The production frontend build and automated endpoint/service tests passed. A complete interactive browser walkthrough of all three roles against the live services was not performed.
 
-### 2.3 Database
+## Not evaluated
 
-Verify that:
-
-* The SQLite database initializes successfully.
-* Required tables are created.
-* The development seed process behaves as expected.
-* Account records are stored correctly.
-* Audit records are persisted correctly.
-* Invalid database operations are handled appropriately.
-
-### 2.4 Orthanc Integration
-
-Verify that:
-
-* The backend can communicate with the configured Orthanc server.
-* Available study information can be retrieved.
-* Failed requests are handled appropriately.
-* Missing imaging metadata does not cause unexpected application failures.
-
-### 2.5 User Interface
-
-Verify that:
-
-* The login page renders correctly.
-* Successful login opens the appropriate dashboard.
-* Navigation links lead to the intended pages.
-* Forms validate required information.
-* Loading, empty, and error states are handled appropriately.
-
-### 2.6 Audit Logging
-
-Verify that:
-
-* Relevant activities generate audit records according to the implementation.
-* Recorded events contain the expected information.
-* Audit records can be viewed by authorized administrators.
-* Unauthorized users cannot access restricted audit information.
-
-## 3. Test Results
-
-Record actual results in the table below.
-
-| Test ID | Test                      | Expected Result                                        | Actual Result | Status  |
-| ------- | ------------------------- | ------------------------------------------------------ | ------------- | ------- |
-| T-01    | Valid administrator login | Login succeeds                                         | To be tested  | Pending |
-| T-02    | Invalid login             | Login is rejected                                      | To be tested  | Pending |
-| T-03    | Database initialization   | Required schema is created                             | To be tested  | Pending |
-| T-04    | Role-based access         | Access follows assigned permissions                    | To be tested  | Pending |
-| T-05    | Orthanc connectivity      | Supported requests return expected responses           | To be tested  | Pending |
-| T-06    | Audit record creation     | Configured events are recorded                         | To be tested  | Pending |
-| T-07    | Logout                    | Session or authentication state is cleared as designed | To be tested  | Pending |
-
-## 4. Usability Evaluation
-
-The planned evaluation uses the System Usability Scale (SUS) with approximately three to five healthcare practitioners, subject to approval and participant availability.
-
-Record participant feedback, completed questionnaires, calculated SUS scores, and observations only after the evaluation has been conducted.
-
-## 5. Testing Limitations
-
-Tests involving unavailable services, incomplete features, or unavailable participant feedback should be identified as pending rather than reported as successful.
+No SUS survey or participant study, clinical validation, diagnostic-accuracy evaluation, production deployment review, or diagnostic-grade viewer validation has been completed. Do not infer completion of these activities from automated tests or the successful build.

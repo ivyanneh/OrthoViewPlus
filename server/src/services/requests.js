@@ -110,6 +110,9 @@ export function createRequestService(db, { notifications } = {}) {
       if (!request) {
         throw new AppError('Imaging request not found.', 404);
       }
+      if (!['submitted', 'scheduled'].includes(request.status)) {
+        throw new AppError('Only submitted or scheduled requests can be claimed.', 409);
+      }
       if (request.assignedRadiologistId && Number(request.assignedRadiologistId) !== Number(radiologistId)) {
         throw new AppError('This imaging request is already assigned to another radiologist.', 409);
       }

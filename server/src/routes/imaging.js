@@ -4,19 +4,32 @@ import { AppError, handleRoute } from '../utils/http.js';
 export function createImagingRouter({ orthanc, studies, patients, patientMappings, requests, audit }) {
   const router = Router();
 
-  function assertStudyAccess(req, orthancStudyId) {
-    if (req.user.role === 'administrator' || req.user.role === 'practitioner') return;
-    if (req.user.role !== 'radiologist' || !studies.isAssignedToRadiologist(orthancStudyId, req.user.id)) {
+  function isAssigned(req, orthancStudyId) {
+    if (req.user.role === 'radiologist') {
+      return studies.isAssignedToRadiologist(orthancStudyId, req.user.id);
+    }
+    if (req.user.role === 'practitioner') {
+      return studies.isAssignedToPractitioner(orthancStudyId, req.user.id);
+    }
+    return false;
+  }
+
+  async function assertStudyAccess(req, orthancStudyId) {
+    if (req.user.role === 'administrator') return;
+    const linkedStudy = studies.getByOrthancStudyId(orthancStudyId);
+    if (!linkedStudy || !isAssigned(req, orthancStudyId)) {
       throw new AppError('You may only access studies assigned to you.', 403);
+    }
+    const profile = await orthanc.getStudyProfile(orthancStudyId);
+    const mapping = profile.patientId ? patientMappings.getVerifiedMapping(profile.patientId) : null;
+    if (!mapping || Number(mapping.patientId) !== Number(linkedStudy.patientId)) {
+      throw new AppError('Study access requires a verified DICOM patient mapping.', 403);
     }
   }
 
   async function assertInstanceAccess(req, instanceId) {
-    const instance = await orthanc.getInstance(instanceId);
-    if (!instance?.ParentStudy) {
-      throw new AppError('Unable to resolve the instance study.', 404);
-    }
-    assertStudyAccess(req, instance.ParentStudy);
+    const resolved = await orthanc.getInstanceStudy(instanceId);
+    await assertStudyAccess(req, resolved.orthancStudyId);
   }
 
   function log(req, action, target, description) {
@@ -32,31 +45,30 @@ export function createImagingRouter({ orthanc, studies, patients, patientMapping
     ['/studies', '/studies/'],
     handleRoute(async (req, res) => {
       const allStudies = await orthanc.listStudies({ limit: Number(req.query.limit) || 80 });
-      const list = req.user.role === 'radiologist'
-        ? allStudies
-          .filter((study) => studies.isAssignedToRadiologist(study.id, req.user.id))
-          .map((study) => {
-            const linkedStudy = studies.getByOrthancStudyId(study.id);
-            const request = studies.getLinkedRequestForOrthancStudy(study.id);
-            return {
-              ...study,
-              sourceStudyId: linkedStudy?.id ?? null,
-              imagingRequestId: linkedStudy?.imagingRequestId ?? null,
-              patientRecordId: linkedStudy?.patientId ?? null,
-              patientMrn: linkedStudy?.mrn ?? null,
-              studyStatus: request?.status ?? null,
-            };
-          })
-        : allStudies.map((study) => {
-          const linkedStudy = studies.getByOrthancStudyId(study.id);
-          const request = studies.getLinkedRequestForOrthancStudy(study.id);
-          return {
-            ...study,
-            sourceStudyId: linkedStudy?.id ?? null,
-            imagingRequestId: linkedStudy?.imagingRequestId ?? null,
-            studyStatus: request?.status ?? null,
-          };
+      const list = [];
+      for (const study of allStudies) {
+        const linkedStudy = studies.getByOrthancStudyId(study.id);
+        const request = studies.getLinkedRequestForOrthancStudy(study.id);
+        if (req.user.role !== 'administrator') {
+        if (!linkedStudy || !study.patientId) continue;
+        const mapping = patientMappings.getVerifiedMapping(study.patientId);
+        if (
+          !mapping ||
+          Number(mapping.patientId) !== Number(linkedStudy.patientId) ||
+          !isAssigned(req, study.id)
+        ) {
+          continue;
+        }
+        }
+        list.push({
+        ...study,
+        sourceStudyId: linkedStudy?.id ?? null,
+        imagingRequestId: linkedStudy?.imagingRequestId ?? null,
+        patientRecordId: linkedStudy?.patientId ?? null,
+        patientMrn: linkedStudy?.mrn ?? null,
+        studyStatus: request?.status ?? null,
         });
+      }
       log(req, 'view_studies', 'orthanc', 'listed imaging studies.');
       res.json({
         studies: list,
@@ -97,7 +109,7 @@ export function createImagingRouter({ orthanc, studies, patients, patientMapping
         orthancStudyId: req.params.id,
         studyInstanceUid: profile.studyInstanceUID,
         studyDate: profile.studyDate,
-        modality: profile.primarySeries?.modality,
+        modality: profile.primarySeries?.modality ?? profile.modalitiesInStudy,
         description: profile.studyDescription,
       });
       log(req, 'orthanc_study_link', `imaging_study:${linkedStudy.id}`, `linked an Orthanc study to imaging request ${request.id}.`);
@@ -108,7 +120,7 @@ export function createImagingRouter({ orthanc, studies, patients, patientMapping
   router.get(
     '/studies/:id',
     handleRoute(async (req, res) => {
-      assertStudyAccess(req, req.params.id);
+      await assertStudyAccess(req, req.params.id);
       const profile = await orthanc.getStudyProfile(req.params.id);
       const series = await orthanc.listSeriesForStudy(req.params.id);
       const linkedStudyRecord = studies.getByOrthancStudyId(req.params.id);
@@ -132,19 +144,11 @@ export function createImagingRouter({ orthanc, studies, patients, patientMapping
         }
       }
       
-      if (linkedPatient && verificationStatus === 'verified') {
-        const linkedStudy = studies.upsertOrthancStudy({
-          patientId: linkedPatient.id,
-          orthancStudyId: req.params.id,
-          studyInstanceUid: profile.studyInstanceUID,
-          studyDate: profile.studyDate,
-          modality: profile.primarySeries?.modality,
-          description: profile.studyDescription,
-        });
-        if (Number(linkedStudy.patientId) !== Number(linkedPatient.id)) {
+      if (linkedStudyRecord && linkedPatient && verificationStatus === 'verified') {
+        if (Number(linkedStudyRecord.patientId) !== Number(linkedPatient.id)) {
           throw new AppError('The verified DICOM mapping does not match the linked imaging study patient.', 409);
         }
-        linkedStudyId = linkedStudy.id;
+        linkedStudyId = linkedStudyRecord.id;
       }
       
       log(req, 'view_study', `orthanc-study:${req.params.id}`, 'opened an imaging study.');

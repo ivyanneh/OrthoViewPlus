@@ -9,6 +9,13 @@ import { createDatabase } from '../src/db.js';
 import { createAiRouter } from '../src/routes/ai.js';
 import { createAdminRouter } from '../src/routes/admin.js';
 import { createImagingRouter } from '../src/routes/imaging.js';
+import { createCompareRouter } from '../src/routes/compare.js';
+import { createExposureRouter } from '../src/routes/exposure.js';
+import { createClinicalRouter } from '../src/routes/clinical.js';
+import { createDashboardRouter } from '../src/routes/dashboard.js';
+import { createAppointmentService } from '../src/services/appointments.js';
+import { createNotificationService } from '../src/services/notifications.js';
+import { createReportService } from '../src/services/reports.js';
 import { createAiJobService } from '../src/services/aiJobs.js';
 import { resolveResultFile, writeResultFile } from '../src/services/aiClient.js';
 import { createPatientMappingService } from '../src/services/patientMappings.js';
@@ -27,6 +34,7 @@ function createFixture() {
   const radiologistId = insertUser.run('radiologist-a', 'test-hash', 'radiologist').lastInsertRowid;
   const otherRadiologistId = insertUser.run('radiologist-b', 'test-hash', 'radiologist').lastInsertRowid;
   const practitionerId = insertUser.run('practitioner', 'test-hash', 'practitioner').lastInsertRowid;
+  const otherPractitionerId = insertUser.run('practitioner-b', 'test-hash', 'practitioner').lastInsertRowid;
   const patientId = db.prepare(
     `INSERT INTO patients (mrn, first_name, last_name, created_by)
      VALUES ('TEST-001', 'Test', 'Patient', ?)`,
@@ -71,6 +79,7 @@ function createFixture() {
     radiologistId,
     otherRadiologistId,
     practitionerId,
+    otherPractitionerId,
     patientId,
     secondPatientId,
     assignedStudyId,
@@ -80,6 +89,180 @@ function createFixture() {
     patients: createPatientService(db),
   };
 }
+
+test('practitioner patient and appointment APIs are scoped to their clinical workflow', async () => {
+  const fixture = createFixture();
+  try {
+    const unrelatedPatientId = fixture.db.prepare(
+      `INSERT INTO patients (mrn, first_name, last_name, created_by)
+       VALUES ('UNRELATED-003', 'Unrelated', 'Patient', ?)`,
+    ).run(fixture.otherPractitionerId).lastInsertRowid;
+    const appointments = createAppointmentService(fixture.db);
+    appointments.create({
+      patientId: fixture.patientId,
+      requestedBy: fixture.practitionerId,
+      createdBy: fixture.practitionerId,
+      date: '2026-11-04',
+      time: '10:00',
+      examination: 'CT',
+      modality: 'CT',
+    });
+    const unrelatedAppointment = appointments.create({
+      patientId: unrelatedPatientId,
+      requestedBy: fixture.otherPractitionerId,
+      createdBy: fixture.otherPractitionerId,
+      date: '2026-11-04',
+      time: '11:00',
+      examination: 'MR',
+      modality: 'MR',
+    });
+    const router = createClinicalRouter({
+      patients: fixture.patients,
+      appointments,
+      requests: createRequestService(fixture.db),
+      reports: { list() { return []; } },
+      studies: fixture.studies,
+      notifications: {},
+      audit: { log() {} },
+      users: { list() { return []; } },
+    });
+    const user = { id: fixture.practitionerId, role: 'practitioner', username: 'practitioner' };
+
+    const patientList = await requestWithUser(router, user, 'GET', '/patients');
+    assert.ok(patientList.body.patients.some((patient) => Number(patient.id) === Number(fixture.patientId)));
+    assert.ok(!patientList.body.patients.some((patient) => Number(patient.id) === Number(unrelatedPatientId)));
+    assert.equal((await requestWithUser(router, user, 'GET', `/patients/${unrelatedPatientId}`)).status, 403);
+
+    const appointmentList = await requestWithUser(router, user, 'GET', '/appointments');
+    assert.ok(appointmentList.body.appointments.length > 0);
+    assert.ok(appointmentList.body.appointments.every((item) => Number(item.requestedBy) === Number(user.id)));
+    assert.ok(!appointmentList.body.appointments.some((item) => Number(item.id) === Number(unrelatedAppointment.id)));
+    assert.equal((await requestWithUser(router, user, 'POST', '/requests', {
+      patientId: unrelatedPatientId,
+      examination: 'MRI',
+      modality: 'MR',
+    })).status, 403);
+    assert.equal((await requestWithUser(router, user, 'POST', '/appointments', {
+      patientId: unrelatedPatientId,
+      date: '2026-11-05',
+      time: '12:00',
+      examination: 'MRI',
+      modality: 'MR',
+    })).status, 403);
+    const registration = await requestWithUser(router, user, 'POST', '/patients', {
+      mrn: 'PRACTITIONER-004',
+      firstName: 'New',
+      lastName: 'Patient',
+    });
+    assert.equal(registration.status, 201);
+    assert.ok((await requestWithUser(router, user, 'POST', '/requests', {
+      patientId: registration.body.patient.id,
+      examination: 'MRI',
+      modality: 'MR',
+    })).status === 201);
+    assert.equal((await requestWithUser(router, user, 'POST', '/appointments', {
+      patientId: registration.body.patient.id,
+      date: '2026-11-06',
+      time: '13:00',
+      examination: 'MRI',
+      modality: 'MR',
+    })).status, 201);
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test('practitioner report lists only approved reports for studies in their workflow', async () => {
+  const fixture = createFixture();
+  try {
+    const unrelatedPatientId = fixture.db.prepare(
+      `INSERT INTO patients (mrn, first_name, last_name, created_by)
+       VALUES ('TEST-003', 'Unrelated', 'Patient', ?)`,
+    ).run(fixture.adminId).lastInsertRowid;
+    const otherPractitionerRequest = fixture.db.prepare(
+      `INSERT INTO imaging_requests (patient_id, requested_by, assigned_radiologist_id, examination, modality)
+       VALUES (?, ?, ?, 'Other study', 'CT')`,
+    ).run(unrelatedPatientId, fixture.otherPractitionerId, fixture.otherRadiologistId);
+    const otherPractitionerStudy = fixture.db.prepare(
+      `INSERT INTO imaging_studies (patient_id, imaging_request_id, orthanc_study_id, description)
+       VALUES (?, ?, 'orthanc-study-other-practitioner', 'Other practitioner study')`,
+    ).run(unrelatedPatientId, otherPractitionerRequest.lastInsertRowId);
+    fixture.db.prepare(
+      `INSERT INTO radiology_reports (
+         imaging_study_id, patient_id, imaging_request_id, radiologist_id, findings, impression, status
+       ) VALUES (?, ?, ?, ?, 'Restricted report', 'Restricted impression', 'approved')`,
+    ).run(otherPractitionerStudy.lastInsertRowId, unrelatedPatientId, otherPractitionerRequest.lastInsertRowId, fixture.otherRadiologistId);
+    const ownReport = fixture.db.prepare(
+      `INSERT INTO radiology_reports (
+         imaging_study_id, patient_id, imaging_request_id, radiologist_id, findings, impression, status
+       ) VALUES (?, ?, ?, ?, 'Own report', 'Own impression', 'approved')`,
+    ).run(
+      fixture.assignedStudyId,
+      fixture.patientId,
+      fixture.db.prepare('SELECT imaging_request_id FROM imaging_studies WHERE id = ?').get(fixture.assignedStudyId).imaging_request_id,
+      fixture.radiologistId,
+    );
+    const router = createClinicalRouter({
+      patients: fixture.patients,
+      appointments: createAppointmentService(fixture.db),
+      requests: createRequestService(fixture.db),
+      reports: createReportService(fixture.db),
+      studies: fixture.studies,
+      notifications: createNotificationService(fixture.db),
+      audit: { log() {} },
+      users: {},
+    });
+    const practitioner = { id: fixture.practitionerId, role: 'practitioner', username: 'practitioner' };
+    const response = await requestWithUser(router, practitioner, 'GET', '/reports');
+    assert.equal(response.status, 200);
+    assert.ok(response.body.reports.some((report) => Number(report.id) === Number(ownReport.lastInsertRowid)));
+    assert.ok(response.body.reports.every((report) =>
+      Number(report.patientId) === Number(fixture.patientId) && report.status === 'approved',
+    ));
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test('approving a report notifies only the practitioner who requested that study', () => {
+  const fixture = createFixture();
+  try {
+    const notifications = createNotificationService(fixture.db);
+    const reports = createReportService(fixture.db, { notifications });
+    const study = fixture.studies.get(fixture.assignedStudyId);
+    const report = reports.saveDraft({
+      patientId: fixture.patientId,
+      imagingStudyId: study.id,
+      imagingRequestId: study.imagingRequestId,
+      radiologistId: fixture.radiologistId,
+      findings: 'Demonstration finding',
+      impression: 'Demonstration impression',
+    });
+
+    reports.approve(report.id, fixture.radiologistId);
+    assert.equal(notifications.unreadCount(fixture.practitionerId), 1);
+    assert.equal(notifications.unreadCount(fixture.otherPractitionerId), 0);
+    const notice = notifications.listForUser(fixture.practitionerId)[0];
+    assert.equal(notice.resourceId, String(report.id));
+    assert.equal(notice.resourceType, 'report');
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test('recent audit dashboard data is only returned to administrators', async () => {
+  const router = createDashboardRouter({
+    orthanc: { async getDashboardSummary() { return { connected: true }; } },
+    audit: {
+      log() {},
+      list() { return { entries: [{ id: 1, action: 'sensitive_activity' }] }; },
+    },
+  });
+  const administrator = await requestWithUser(router, { id: 1, role: 'administrator' }, 'GET', '/');
+  const practitioner = await requestWithUser(router, { id: 2, role: 'practitioner' }, 'GET', '/');
+  assert.equal(administrator.body.recentAudit.length, 1);
+  assert.deepEqual(practitioner.body.recentAudit, []);
+});
 
 function closeFixture(fixture) {
   fixture.db.close();
@@ -147,16 +330,30 @@ function createMockOrthanc() {
   return {
     async listStudies() { return studies; },
     async getHealth() { return { connected: true }; },
+    async getOrthancStatus() { return { connected: true }; },
     async getStudyProfile(id) {
       const selected = studies.find((study) => study.id === id);
-      return { id, patientId: selected?.patientId, primarySeries: {} };
+      const modality = selected?.patientId === 'dicom-patient-new' ? 'MR' : 'CT';
+      return {
+        id,
+        patientId: selected?.patientId,
+        modalitiesInStudy: modality,
+        primarySeries: { modality },
+        studyDescription: `Study ${id}`,
+      };
     },
     async listSeriesForStudy() { return []; },
     async getInstance(id) {
       const parentStudy = id === 'instance-b' || id === 'prior-b'
         ? 'orthanc-study-b'
+        : id === 'prior-allowed' ? 'orthanc-study-prior'
         : id === 'instance-c' ? 'orthanc-study-c' : 'orthanc-study-a';
       return { ID: id, ParentStudy: parentStudy };
+    },
+    async getInstanceStudy(id) {
+      const instance = await this.getInstance(id);
+      const tags = await this.getInstanceTags(id);
+      return { orthancStudyId: instance.ParentStudy, patientId: tags.PatientID };
     },
     async getInstanceTags(id) {
       return { PatientID: id === 'instance-c' || id === 'prior-c' ? 'dicom-patient-b' : 'dicom-patient-a' };
@@ -171,6 +368,86 @@ function createMockOrthanc() {
     },
   };
 }
+
+test('study comparison lists and compares only linked, verified studies assigned to the user', async () => {
+  const fixture = createFixture();
+  try {
+    const orthanc = createMockOrthanc();
+    const router = createCompareRouter({
+      orthanc,
+      audit: { log() {} },
+      studies: fixture.studies,
+      patientMappings: fixture.mappings,
+    });
+    const radiologist = { id: fixture.radiologistId, role: 'radiologist', username: 'radiologist-a' };
+    const practitioner = { id: fixture.practitionerId, role: 'practitioner', username: 'practitioner' };
+    const administrator = { id: fixture.adminId, role: 'administrator', username: 'admin' };
+
+    const radiologistStudies = await requestWithUser(router, radiologist, 'GET', '/studies');
+    assert.equal(radiologistStudies.status, 200);
+    assert.deepEqual(radiologistStudies.body.studies.map((study) => study.id), ['orthanc-study-a']);
+    assert.equal((await requestWithUser(
+      router,
+      radiologist,
+      'GET',
+      '/compare?leftStudyId=orthanc-study-a&rightStudyId=orthanc-study-b',
+    )).status, 403);
+    assert.equal((await requestWithUser(
+      router,
+      radiologist,
+      'GET',
+      '/compare?leftStudyId=orthanc-study-a&rightStudyId=orthanc-study-d',
+    )).status, 403);
+
+    const samePatientComparison = await requestWithUser(
+      router,
+      practitioner,
+      'GET',
+      '/compare?leftStudyId=orthanc-study-a&rightStudyId=orthanc-study-b',
+    );
+    assert.equal(samePatientComparison.status, 200);
+    assert.equal(samePatientComparison.body.comparison.left.patientId, 'dicom-patient-a');
+    const otherPatientComparison = await requestWithUser(
+      router,
+      practitioner,
+      'GET',
+      '/compare?leftStudyId=orthanc-study-a&rightStudyId=orthanc-study-c',
+    );
+    assert.equal(otherPatientComparison.status, 409);
+
+    assert.equal((await requestWithUser(router, administrator, 'GET', '/studies')).status, 403);
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test('exposure index returns only rows for linked, verified, user-assigned studies', async () => {
+  const fixture = createFixture();
+  try {
+    const orthanc = createMockOrthanc();
+    orthanc.getExposureIndexRows = async () => [
+      { id: 'a', orthancStudyId: 'orthanc-study-a', patientId: 'dicom-patient-a' },
+      { id: 'b', orthancStudyId: 'orthanc-study-b', patientId: 'dicom-patient-a' },
+      { id: 'c', orthancStudyId: 'orthanc-study-c', patientId: 'dicom-patient-b' },
+      { id: 'd', orthancStudyId: 'orthanc-study-d', patientId: 'dicom-patient-new' },
+    ];
+    const router = createExposureRouter({
+      orthanc,
+      audit: { log() {} },
+      studies: fixture.studies,
+      patientMappings: fixture.mappings,
+    });
+    const radiologist = { id: fixture.radiologistId, role: 'radiologist' };
+    const practitioner = { id: fixture.practitionerId, role: 'practitioner' };
+
+    const radiologistRows = await requestWithUser(router, radiologist, 'GET', '/');
+    assert.deepEqual(radiologistRows.body.rows.map((row) => row.id), ['a']);
+    const practitionerRows = await requestWithUser(router, practitioner, 'GET', '/');
+    assert.deepEqual(practitionerRows.body.rows.map((row) => row.id), ['a', 'b', 'c']);
+  } finally {
+    closeFixture(fixture);
+  }
+});
 
 test('radiologist imaging access is tied to the exact linked request and study', async () => {
   const fixture = createFixture();
@@ -230,6 +507,15 @@ test('only administrators can explicitly link an Orthanc study to an exactly mat
     ).get(fixture.radiologistId);
     const administrator = { id: fixture.adminId, role: 'administrator', username: 'admin' };
     const radiologist = { id: fixture.radiologistId, role: 'radiologist', username: 'radiologist-a' };
+
+    const wrongModalityRequest = fixture.db.prepare(
+      `INSERT INTO imaging_requests (patient_id, requested_by, assigned_radiologist_id, examination, modality)
+       VALUES (?, ?, ?, 'Brain MR', 'MR')`,
+    ).run(fixture.patientId, fixture.practitionerId, fixture.radiologistId);
+    const wrongModality = await requestWithUser(router, administrator, 'POST', '/studies/orthanc-study-a/link', {
+      requestId: wrongModalityRequest.lastInsertRowid,
+    });
+    assert.equal(wrongModality.status, 409);
 
     assert.equal((await requestWithUser(router, radiologist, 'POST', '/studies/orthanc-study-a/link', {
       requestId: assignedRequest.id,
@@ -540,6 +826,14 @@ test('AI creation checks exact study assignment and derives patient identity fro
   const fixture = createFixture();
   try {
     const orthanc = createMockOrthanc();
+    const priorRequestId = fixture.db.prepare(
+      `INSERT INTO imaging_requests (patient_id, requested_by, assigned_radiologist_id, examination, modality)
+       VALUES (?, ?, ?, 'CT prior', 'CT')`,
+    ).run(fixture.patientId, fixture.practitionerId, fixture.radiologistId).lastInsertRowid;
+    fixture.db.prepare(
+      `INSERT INTO imaging_studies (patient_id, imaging_request_id, orthanc_study_id, description)
+       VALUES (?, ?, 'orthanc-study-prior', 'Authorized prior study')`,
+    ).run(fixture.patientId, priorRequestId);
     let enqueued;
     const aiJobs = {
       async validateInputSize() { return true; },
@@ -563,6 +857,16 @@ test('AI creation checks exact study assignment and derives patient identity fro
     });
     assert.equal(assigned.status, 201);
     assert.equal(enqueued.patientId, fixture.patientId);
+
+    const validPrior = await requestWithUser(router, radiologist, 'POST', '/jobs', {
+      capability: 'compare',
+      sourceStudyId: fixture.assignedStudyId,
+      instanceId: 'instance-a',
+      priorInstanceId: 'prior-allowed',
+    });
+    assert.equal(validPrior.status, 201);
+    assert.equal(enqueued.patientId, fixture.patientId);
+    assert.equal(enqueued.input.priorInstanceId, 'prior-allowed');
 
     const unassigned = await requestWithUser(router, radiologist, 'POST', '/jobs', {
       capability: 'restore',
@@ -621,6 +925,21 @@ test('AI job and result routes do not substitute requester ownership for exact s
     assert.equal((await requestWithUser(router, user, 'GET', '/results/9/overlay')).status, 403);
     assert.equal((await requestWithUser(router, user, 'POST', '/results/9/review', {})).status, 403);
     assert.equal((await requestWithUser(router, user, 'POST', '/jobs/8/retry', {})).status, 403);
+
+    const administrator = { id: fixture.adminId, role: 'administrator' };
+    for (const [method, route, body] of [
+      ['GET', '/capabilities'],
+      ['GET', '/health'],
+      ['GET', '/jobs'],
+      ['GET', '/jobs/8'],
+      ['POST', '/jobs', { capability: 'synthetic' }],
+      ['GET', '/results/9/file'],
+      ['GET', '/results/9/overlay'],
+      ['POST', '/results/9/review', {}],
+      ['POST', '/jobs/8/retry', {}],
+    ]) {
+      assert.equal((await requestWithUser(router, administrator, method, route, body)).status, 403);
+    }
   } finally {
     closeFixture(fixture);
   }
@@ -680,6 +999,7 @@ test('recovery resumes queued and interrupted jobs without duplicating results o
       orthanc: createMockOrthanc(),
       resultsDirectory: fixture.directory,
     });
+
     jobs.recoverInterruptedJobs();
 
     for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -700,6 +1020,50 @@ test('recovery resumes queued and interrupted jobs without duplicating results o
     assert.equal(fixture.db.prepare('SELECT retry_count FROM ai_jobs WHERE id = ?').get(interruptedId).retry_count, 1);
     assert.equal(fixture.db.prepare('SELECT status FROM ai_jobs WHERE id = ?').get(exhaustedId).status, 'failed');
     assert.equal(fixture.db.prepare('SELECT retry_count FROM ai_jobs WHERE id = ?').get(exhaustedId).retry_count, 3);
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test('AI processing rejection is stored for review but job status remains failed', async () => {
+  const fixture = createFixture();
+  try {
+    const jobs = createAiJobService(fixture.db, {
+      aiClient: {
+        capabilities: { segment3d: {} },
+        async process() {
+          return {
+            result_kind: 'segmentation_rejected',
+            label: '3D visualisation unavailable: insufficient volume data',
+            warnings: ['At least eight slices are required.'],
+            metrics: { slice_count: 2 },
+          };
+        },
+      },
+      orthanc: {
+        async getSeries() { return { Instances: ['one', 'two'] }; },
+        async getInstanceFile() { return Buffer.from('test-dicom'); },
+      },
+      resultsDirectory: fixture.directory,
+    });
+    const job = jobs.enqueue({
+      capability: 'segment3d',
+      requestedBy: fixture.radiologistId,
+      patientId: fixture.patientId,
+      sourceStudyId: fixture.assignedStudyId,
+      input: { seriesId: 'test-series' },
+    });
+
+    let updated = job;
+    for (let attempt = 0; attempt < 50 && ['queued', 'running'].includes(updated.status); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      updated = jobs.getJob(job.id);
+    }
+
+    assert.equal(updated.status, 'failed');
+    assert.match(updated.error, /insufficient volume data/);
+    assert.equal(updated.results.length, 1);
+    assert.equal(updated.results[0].resultKind, 'segmentation_rejected');
   } finally {
     closeFixture(fixture);
   }

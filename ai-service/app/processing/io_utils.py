@@ -13,18 +13,37 @@ except ImportError:  # pragma: no cover
     pydicom = None
 
 
+def _vector(value, length: int) -> list[float] | None:
+    if value is None:
+        return None
+    try:
+        result = [float(item) for item in value]
+        return result if len(result) == length and np.isfinite(result).all() else None
+    except (TypeError, ValueError):
+        return None
+
+
 def decode_upload(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
     """Decode DICOM bytes or a standard image into an 8-bit grayscale array."""
+    if not data:
+        raise ValueError("Image upload is empty.")
     metadata: dict[str, Any] = {"format": "image"}
     if pydicom is not None:
         try:
             dataset = pydicom.dcmread(io.BytesIO(data), force=True)
             if hasattr(dataset, "pixel_array"):
                 pixels = dataset.pixel_array.astype(np.float32)
+                if pixels.ndim != 2:
+                    raise ValueError("Multiframe or non-2D DICOM images are not supported by this capability.")
+                if pixels.size > 64 * 1024 * 1024:
+                    raise ValueError("DICOM image dimensions exceed the processing limit.")
                 slope = float(getattr(dataset, "RescaleSlope", 1) or 1)
                 intercept = float(getattr(dataset, "RescaleIntercept", 0) or 0)
                 pixels = pixels * slope + intercept
                 display = _window_array(pixels, dataset)
+                photometric = str(getattr(dataset, "PhotometricInterpretation", "") or "")
+                if photometric == "MONOCHROME1":
+                    display = 255 - display
                 metadata = {
                     "format": "dicom",
                     "patient_id": str(getattr(dataset, "PatientID", "") or ""),
@@ -34,20 +53,38 @@ def decode_upload(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
                     "study_instance_uid": str(getattr(dataset, "StudyInstanceUID", "") or ""),
                     "rows": int(display.shape[0]),
                     "columns": int(display.shape[1]),
-                    "photometric": str(getattr(dataset, "PhotometricInterpretation", "") or ""),
+                    "photometric": photometric,
+                    "instance_number": _optional_int(getattr(dataset, "InstanceNumber", None)),
+                    "image_position_patient": _vector(getattr(dataset, "ImagePositionPatient", None), 3),
+                    "image_orientation_patient": _vector(getattr(dataset, "ImageOrientationPatient", None), 6),
+                    "pixel_spacing": _vector(getattr(dataset, "PixelSpacing", None), 2),
                 }
                 return display, metadata
-        except Exception:
+        except ValueError:
+            raise
+        except (OSError, AttributeError, TypeError):
             pass
 
     encoded = np.frombuffer(data, dtype=np.uint8)
     image = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
     if image is None:
-        pil = Image.open(io.BytesIO(data)).convert("L")
+        try:
+            pil = Image.open(io.BytesIO(data)).convert("L")
+        except (OSError, ValueError) as error:
+            raise ValueError("Image upload is malformed or uses an unsupported format.") from error
         image = np.array(pil)
+    if image.ndim != 2 or image.size > 64 * 1024 * 1024:
+        raise ValueError("Image dimensions exceed the supported processing limits.")
     metadata["rows"] = int(image.shape[0])
     metadata["columns"] = int(image.shape[1])
     return image, metadata
+
+
+def _optional_int(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _window_array(pixels: np.ndarray, dataset) -> np.ndarray:

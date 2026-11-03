@@ -1,101 +1,40 @@
 # OrthoView+ System Architecture
 
-## 1. Project Overview
+## Components
 
-OrthoView+ is a web-based clinical interface designed to enhance medical imaging workflows among healthcare practitioners. It provides an interface for interacting with medical imaging data managed by an Orthanc server.
+OrthoView+ comprises five cooperating components:
 
-The system focuses on imaging workflow organization, exposure information, scan comparison, system monitoring, and user activity auditing. It is not an AI diagnostic system and does not provide automated clinical diagnoses.
+1. **React 19 / Vite frontend** — role-specific pages, forms, notifications and authenticated imaging viewers.
+2. **Node.js / Express backend** — authentication, role and resource authorization, SQLite services, audit logging, Orthanc REST integration, and AI job management.
+3. **SQLite / better-sqlite3** — users, patients, requests, appointments, internal study links, reports, audit logs, notifications and AI job/result metadata.
+4. **Orthanc DICOM server** — source DICOM studies, series, instances, tags and rendered image representations.
+5. **Python FastAPI image-processing service** — isolated experimental processing capabilities, invoked only by the backend.
 
-## 2. Architecture Overview
+The backend owns service credentials and the browser does not call Orthanc or FastAPI directly. SQLite stores references and application workflow metadata, not source DICOM files.
 
-OrthoView+ uses a client-server architecture consisting of three main components:
+## Request and identity flow
 
-1. React frontend
-2. Node.js and Express backend
-3. Orthanc medical imaging server
+1. A user signs in; Express authenticates and attaches the application user and role.
+2. The frontend calls an authenticated Express route.
+3. The route checks role and resource-specific permission before returning or changing data.
+4. The backend reads/writes SQLite and, where required, calls Orthanc.
+5. The backend records relevant administrative, clinical workflow, access and review actions in the audit log.
+6. Only a radiologist-authorized AI route may enqueue processing; the backend resolves the exact source and optional prior resources and enforces the configured instance bound before sending DICOM files to FastAPI.
 
-SQLite is used for application data that needs to be stored separately from the medical imaging data managed by Orthanc.
+Application patient identity is established by an administrator-created, manually verified mapping from Orthanc DICOM PatientID to the internal patient record. DICOM name similarity is not used to auto-verify. A selected Orthanc study must be linked to an imaging request for the same internal patient. Radiologist access requires assignment to that exact linked study; practitioner access is scoped to the corresponding request/appointment; administrators retain their authorized management/archive access.
 
-## 3. System Components
+Study linking also requires a compatible request/study modality. The administrator must choose and confirm the exact imaging request; matching patient identity alone is insufficient.
 
-### 3.1 Frontend
+## Role workflows
 
-Technology: React and Vite.
+- **Administrator:** user/account management, patient registry, Orthanc refresh, pending/verified/rejected identity mappings, exact study-to-request linking, scheduling, alerts, operational monitoring and audit review.
+- **Practitioner:** workflow-scoped patient registration/search/history, request submission, scheduling, authorized study and approved-report review, exposure information, same-patient authorized comparison, profile and notifications.
+- **Radiologist:** assigned/claimable requests, request-scoped history, DICOM review for assigned linked studies, authorized comparison, experimental AI jobs/results, reporting/approval, profile and notifications.
 
-Responsibilities:
+Front-end route guards improve navigation but are not the security boundary; Express authorization is authoritative. Practitioner patient search/history, requests, appointments and reports are limited to that user's request/appointment workflow (including records the practitioner created). Radiologists can only retrieve history and reports associated with their assigned requests/studies.
 
-* Provide the login interface.
-* Display role-specific dashboards and navigation.
-* Present imaging workflow information.
-* Display exposure information and scan comparison interfaces.
-* Provide administrative interfaces for user management and system monitoring.
-* Display activity and audit information according to user permissions.
+## Imaging and AI limitations
 
-### 3.2 Backend
+The DICOM display is a basic study/image viewer rather than a diagnostic-grade PACS workstation. Exposure values depend on available modality metadata. The seven AI capabilities are prototypes (restoration, completeness assessment, longitudinal comparison, anatomical reconstruction, experimental 3D visualization, synthetic generation, and complementary-view synthesis). These capabilities use classical image-processing algorithms (OpenCV denoising, CLAHE, ECC alignment, intensity isosurface generation, procedural NumPy phantom generation) and are not trained predictive AI models. Similar-case retrieval is excluded. Derived and synthetic results are labelled and require radiologist review; they are not validated diagnoses and do not replace acquired images.
 
-Technology: Node.js and Express.
-
-Responsibilities:
-
-* Handle authentication and authorization.
-* Provide API endpoints for the frontend.
-* Communicate with Orthanc through its REST API.
-* Access application data stored in SQLite.
-* Record relevant user activity in the audit log.
-* Keep sensitive server configuration and Orthanc credentials on the backend.
-
-### 3.3 Database
-
-Technology: SQLite, accessed using better-sqlite3.
-
-Responsibilities:
-
-* Store application-specific information.
-* Store user account information and password hashes.
-* Store audit records and other application data supported by the implementation.
-
-The SQLite database is separate from Orthanc's management of medical imaging studies and related imaging resources.
-
-### 3.4 Orthanc Server
-
-Orthanc manages medical imaging resources and exposes a REST API used by the OrthoView+ backend.
-
-The backend retrieves or updates information through supported Orthanc API operations. The frontend does not need direct access to Orthanc credentials.
-
-## 4. Architecture Flow
-
-The general request flow is:
-
-1. A user interacts with the React frontend.
-2. The frontend sends a request to the Express backend.
-3. The backend validates the request and applies the relevant authentication and authorization rules.
-4. The backend communicates with SQLite, Orthanc, or both, depending on the operation.
-5. The backend returns an appropriate response to the frontend.
-6. The frontend displays the resulting information.
-
-## 5. Security Considerations
-
-* Passwords must be stored as secure hashes rather than plaintext.
-* Authentication and authorization are handled by the backend.
-* Administrative functions must be restricted to authorized administrators.
-* Orthanc credentials must not be exposed in frontend code.
-* Environment files containing secrets must not be committed to GitHub.
-* Audit records should capture relevant security and administrative activities.
-* Only appropriate demonstration or authorized imaging data should be used during development and testing.
-
-## 6. Development Environment
-
-The project is developed using Visual Studio Code and Git/GitHub.
-
-The frontend and backend run as separate development processes. The SQLite database is maintained by the backend.
-
-## 7. Architecture Scope
-
-OrthoView+ acts as a web interface and middleware layer around Orthanc. It does not replace Orthanc, implement an independent DICOM storage server, or perform AI-based diagnosis.
-
-## 8. Future Improvements
-
-Potential improvements include additional imaging workflow features, expanded audit reporting, more comprehensive automated tests, and usability evaluation with healthcare practitioners.
-
-Future improvements should be distinguished from functionality already implemented.
-
+No SUS evaluation, clinical validation, hospital deployment, or diagnostic performance study is claimed. Live integration status depends on the configured Orthanc instance, database mappings/requests, and running AI service.

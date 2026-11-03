@@ -5,6 +5,28 @@ import ErrorMessage from '../../components/ErrorMessage.jsx';
 import LoadingState from '../../components/LoadingState.jsx';
 import { formatDicomDate, formatValue, getApiError } from '../../utils/format.js';
 
+const REQUEST_MODALITY_CODES = {
+  MRI: ['MR'],
+  'X-RAY': ['CR', 'DX', 'XR', 'RF'],
+  XR: ['CR', 'DX', 'XR', 'RF'],
+};
+
+function modalityCodes(value) {
+  return String(value || '')
+    .split(/[\\,]/)
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function defaultRequestModality(value) {
+  const codes = modalityCodes(value);
+  if (codes.includes('CT')) return 'CT';
+  if (codes.includes('MR')) return 'MR';
+  if (codes.includes('US')) return 'US';
+  if (codes.some((code) => ['CR', 'DX', 'XR', 'RF'].includes(code))) return 'XR';
+  return codes[0] || '';
+}
+
 export default function ImagingStudyManagement() {
   const [studies, setStudies] = useState([]);
   const [patients, setPatients] = useState([]);
@@ -50,11 +72,19 @@ export default function ImagingStudyManagement() {
     ? mappings.find((mapping) => mapping.orthancPatientId?.toLowerCase() === selectedStudy.patientId?.toLowerCase())
     : null;
   const eligibleRequests = useMemo(
-    () => requests.filter((request) =>
-      Number(request.patientId) === Number(selectedMapping?.patientId) &&
-      request.status !== 'cancelled',
-    ),
-    [requests, selectedMapping],
+    () => {
+      const studyCodes = new Set(modalityCodes(selectedStudy?.modalitiesInStudy));
+      return requests.filter((request) => {
+        const requestCodes = modalityCodes(request.modality).flatMap(
+          (code) => REQUEST_MODALITY_CODES[code] || [code],
+        );
+        return Number(request.patientId) === Number(selectedMapping?.patientId) &&
+          request.status !== 'cancelled' &&
+          studyCodes.size > 0 &&
+          requestCodes.some((code) => studyCodes.has(code));
+      });
+    },
+    [requests, selectedMapping, selectedStudy],
   );
 
   async function createMapping(event) {
@@ -127,7 +157,7 @@ export default function ImagingStudyManagement() {
       });
       setSelectedRequestId(String(data.request.id));
       setExamination('');
-      setModality(selectedStudy?.modalitiesInStudy || '');
+      setModality(defaultRequestModality(selectedStudy?.modalitiesInStudy));
       setPriority('routine');
       setNotice(`Imaging request ${data.request.id} created for the verified patient. Confirm it is the correct request before linking.`);
       await load();
@@ -180,7 +210,7 @@ export default function ImagingStudyManagement() {
                           setSelectedPatientId(mapping?.patientId ? String(mapping.patientId) : '');
                           setSelectedRequestId(study.imagingRequestId ? String(study.imagingRequestId) : '');
                             setExamination('');
-                            setModality(study.modalitiesInStudy || '');
+                            setModality(defaultRequestModality(study.modalitiesInStudy));
                           }}>Manage</button>
                       </td>
                     </tr>
@@ -253,7 +283,7 @@ export default function ImagingStudyManagement() {
                 </form>
               ) : (
                 <div>
-                  <p className="muted">No non-cancelled imaging request exists for this verified patient. Create one for this patient using the existing request workflow.</p>
+                  <p className="muted">No non-cancelled imaging request for this study's modality exists for the verified patient. Create an appropriate request before linking.</p>
                   <form onSubmit={createRequest}>
                     <div className="form-grid">
                       <div className="field">

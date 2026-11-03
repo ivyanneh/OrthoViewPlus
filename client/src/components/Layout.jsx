@@ -8,6 +8,10 @@ const pageMeta = {
     title: 'Dashboard',
     description: 'PACS connectivity, archive volume and recent workstation activity.',
   },
+  '/clinical-workspace': {
+    title: 'Patients & Requests',
+    description: 'Patient records in your workflow, imaging requests and appointment scheduling.',
+  },
   '/exposure-index': {
     title: 'Exposure Index',
     description: 'Dose-related acquisition indicators (EI, EIT, DI) retrieved from Orthanc.',

@@ -93,7 +93,7 @@ const requireAuth = createAuthMiddleware(JWT_SECRET, { getAuthState: users.getAu
 const requireAdministrator = createRoleMiddleware('administrator');
 const requireClinical = createRoleMiddleware(['practitioner', 'radiologist']);
 const requireImagingAccess = createRoleMiddleware(['administrator', 'practitioner', 'radiologist']);
-const requireAiAccess = createRoleMiddleware(['administrator', 'radiologist']);
+const requireAiAccess = createRoleMiddleware('radiologist');
 
 appointments.processOverdue();
 setInterval(() => {
@@ -116,8 +116,8 @@ app.use('/api/audit', requireAuth, requireAdministrator, createAuditRouter({ aud
 app.use('/api/admin', requireAuth, requireAdministrator, createAdminRouter({ db, audit, users, patients, schedule, alerts, orthanc, patientMappings }));
 app.use('/api/stats', requireAuth, requireAdministrator, createStatsRouter({ db, users, patients, appointments, orthanc, audit }));
 app.use('/api/dashboard', requireAuth, createDashboardRouter({ orthanc, audit }));
-app.use('/api/exposure', requireAuth, requireClinical, createExposureRouter({ orthanc, audit }));
-app.use('/api/compare', requireAuth, requireClinical, createCompareRouter({ orthanc, audit }));
+app.use('/api/exposure', requireAuth, requireClinical, createExposureRouter({ orthanc, audit, studies, patientMappings }));
+app.use('/api/compare', requireAuth, requireClinical, createCompareRouter({ orthanc, audit, studies, patientMappings }));
 app.use('/api/clinical', requireAuth, createClinicalRouter({ patients, appointments, requests, reports, studies, notifications, audit, users }));
 app.use('/api/imaging', requireAuth, requireImagingAccess, createImagingRouter({ orthanc, studies, patients, patientMappings, requests, audit }));
 app.use('/api/ai', requireAuth, requireAiAccess, createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patientMappings, resultsDirectory: AI_RESULTS_DIR }));

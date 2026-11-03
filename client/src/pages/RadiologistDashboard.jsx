@@ -32,6 +32,7 @@ export default function RadiologistDashboard() {
   const [requests, setRequests] = useState([]);
   const [requestQueue, setRequestQueue] = useState([]);
   const [studies, setStudies] = useState([]);
+  const [jobs, setJobs] = useState([]);
   const [capabilities, setCapabilities] = useState([]);
   const [aiHealth, setAiHealth] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -44,6 +45,7 @@ export default function RadiologistDashboard() {
   const [patientHistory, setPatientHistory] = useState(null);
   const [loadingStudy, setLoadingStudy] = useState(false);
   const [capability, setCapability] = useState('restore');
+  const [syntheticSeed, setSyntheticSeed] = useState(7);
   const [seriesId, setSeriesId] = useState('');
   const [studyLimit, setStudyLimit] = useState(50);
   const [job, setJob] = useState(null);
@@ -52,6 +54,7 @@ export default function RadiologistDashboard() {
   const [findings, setFindings] = useState('');
   const [impression, setImpression] = useState('');
   const [reportStatus, setReportStatus] = useState('');
+  const [report, setReport] = useState(null);
 
   const selectedRequest = useMemo(
     () => requests.find((request) => String(request.id) === String(selectedRequestId)),
@@ -75,12 +78,13 @@ export default function RadiologistDashboard() {
 
   async function loadWorkspace(limit = studyLimit) {
     setError('');
-    const [assignedResult, queueResult, studyResult, capabilityResult, healthResult] = await Promise.allSettled([
+    const [assignedResult, queueResult, studyResult, capabilityResult, healthResult, jobsResult] = await Promise.allSettled([
       api.get('/clinical/requests', { params: { mine: 'true' } }),
       api.get('/clinical/requests'),
       api.get('/imaging/studies', { params: { limit } }),
       api.get('/ai/capabilities'),
       api.get('/ai/health'),
+      api.get('/ai/jobs', { params: { limit: 100 } }),
     ]);
 
     if (assignedResult.status === 'fulfilled') {
@@ -108,6 +112,8 @@ export default function RadiologistDashboard() {
     }
 
     if (healthResult.status === 'fulfilled') setAiHealth(healthResult.value.data);
+    if (jobsResult.status === 'fulfilled') setJobs(jobsResult.value.data.jobs || []);
+    else setAiError((current) => current || getApiError(jobsResult.reason, 'Unable to load authorized AI job history.'));
     setLoading(false);
   }
 
@@ -121,6 +127,7 @@ export default function RadiologistDashboard() {
       try {
         const response = await api.get(`/ai/jobs/${job.id}`);
         setJob(response.data.job);
+        setJobs((current) => current.map((item) => item.id === response.data.job.id ? response.data.job : item));
         setAiError('');
       } catch (requestError) {
         setAiError(getApiError(requestError, 'Unable to refresh the AI job.'));
@@ -151,6 +158,9 @@ export default function RadiologistDashboard() {
       setSelectedStudyId('');
       setStudyProfile(null);
       setJob(null);
+      setReport(null);
+      setFindings('');
+      setImpression('');
       try {
         const history = await api.get(`/clinical/patients/${request.patientId}`, {
           params: { requestId: request.id },
@@ -168,6 +178,10 @@ export default function RadiologistDashboard() {
     setStudyProfile(null);
     setPatientHistory(null);
     setJob(null);
+    setReport(null);
+    setFindings('');
+    setImpression('');
+    setReportStatus('');
     setLoadingStudy(true);
     setError('');
     try {
@@ -177,10 +191,21 @@ export default function RadiologistDashboard() {
       const patientRecordId = response.data.linkedPatient?.id || study.patientRecordId;
       if (patientRecordId) {
         const requestId = response.data.imagingRequestId || study.imagingRequestId;
-        const history = await api.get(`/clinical/patients/${patientRecordId}`, {
-          params: requestId ? { requestId } : undefined,
-        });
+        const [history, reportList] = await Promise.all([
+          api.get(`/clinical/patients/${patientRecordId}`, {
+            params: requestId ? { requestId } : undefined,
+          }),
+          api.get('/clinical/reports', {
+            params: { patientId: patientRecordId, mine: 'true' },
+          }),
+        ]);
         setPatientHistory(history.data);
+        const existingReport = (reportList.data.reports || []).find(
+          (item) => Number(item.imagingStudyId) === Number(response.data.sourceStudyId),
+        ) || null;
+        setReport(existingReport);
+        setFindings(existingReport?.findings || '');
+        setImpression(existingReport?.impression || '');
       }
     } catch (requestError) {
       setError(getApiError(requestError, 'Unable to open the assigned imaging study.'));
@@ -220,6 +245,7 @@ export default function RadiologistDashboard() {
       }
       const response = await api.post('/ai/jobs', {
         capability,
+        ...(capability === 'synthetic' ? { notes: String(syntheticSeed) } : {}),
         ...(needsStudy ? {
           sourceStudyId: studyProfile.sourceStudyId,
           instanceId: needsSeries ? undefined : studyProfile.study.primaryInstance.id,
@@ -230,6 +256,7 @@ export default function RadiologistDashboard() {
         } : {}),
       });
       setJob(response.data.job);
+      setJobs((current) => [response.data.job, ...current.filter((item) => item.id !== response.data.job.id)]);
     } catch (requestError) {
       setAiError(getApiError(requestError, requestError.message || 'Unable to queue the AI job.'));
     } finally {
@@ -242,6 +269,7 @@ export default function RadiologistDashboard() {
     try {
       const response = await api.get(`/ai/jobs/${job.id}`);
       setJob(response.data.job);
+      setJobs((current) => current.map((item) => item.id === response.data.job.id ? response.data.job : item));
       setAiError('');
     } catch (requestError) {
       setAiError(getApiError(requestError, 'Unable to refresh the AI job.'));
@@ -265,15 +293,44 @@ export default function RadiologistDashboard() {
     setReportStatus('');
     try {
       const response = await api.post('/clinical/reports', {
+        ...(report?.id ? { id: report.id } : {}),
         patientId: patientHistory.patient.id,
         imagingStudyId: selectedStudy.sourceStudyId,
         imagingRequestId: selectedStudy.imagingRequestId,
         findings,
         impression,
       });
+      setReport(response.data.report);
       setReportStatus(`Draft saved (report ${response.data.report.id}).`);
     } catch (requestError) {
       setReportStatus(getApiError(requestError, 'Unable to save the report draft.'));
+    }
+  }
+
+  async function approveReport() {
+    if (!report?.id) return;
+    setReportStatus('');
+    try {
+      const response = await api.post(`/clinical/reports/${report.id}/approve`);
+      setReport(response.data.report);
+      setReportStatus('Report approved and finalized.');
+    } catch (requestError) {
+      setReportStatus(getApiError(requestError, 'Unable to approve the report.'));
+    }
+  }
+
+  async function retryJob() {
+    if (!job?.id) return;
+    setAiError('');
+    setSubmitting(true);
+    try {
+      const response = await api.post(`/ai/jobs/${job.id}/retry`);
+      setJob(response.data.job);
+      setJobs((current) => current.map((item) => item.id === response.data.job.id ? response.data.job : item));
+    } catch (requestError) {
+      setAiError(getApiError(requestError, 'Unable to retry the AI job.'));
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -438,9 +495,43 @@ export default function RadiologistDashboard() {
           <p className="muted">{selectedPriorStudyId ? 'The selected prior study is linked, same-patient, and assigned to you.' : 'A different prior assigned study is required.'}</p>
         ) : null}
         {needsSeries ? <p className="muted">Selected series: {formatValue(studyProfile?.series?.find((item) => item.id === seriesId)?.description)}. Select the series in the viewer before running.</p> : null}
+        {capability === 'synthetic' ? (
+          <div className="field">
+            <label htmlFor="synthetic-seed">Synthetic phantom seed</label>
+            <input id="synthetic-seed" type="number" min="0" max="2147483647" value={syntheticSeed} onChange={(event) => setSyntheticSeed(event.target.value)} />
+            <p className="muted">This creates a procedural phantom and does not use patient images or identity.</p>
+          </div>
+        ) : null}
         <button type="button" className="primary-button" onClick={submitAi} disabled={submitting || !aiHealth?.available || (needsStudy && !studyProfile)}>
           {submitting ? 'Submitting...' : 'Submit for processing'}
         </button>
+        <div className="field">
+          <label htmlFor="ai-job-history">Authorized AI job history</label>
+          <select
+            id="ai-job-history"
+            value={job?.id || ''}
+            onChange={async (event) => {
+              const selectedJob = jobs.find((item) => String(item.id) === event.target.value);
+              if (!selectedJob) {
+                setJob(null);
+                return;
+              }
+              try {
+                const response = await api.get(`/ai/jobs/${selectedJob.id}`);
+                setJob(response.data.job);
+                setJobs((current) => current.map((item) => item.id === response.data.job.id ? response.data.job : item));
+                setAiError('');
+              } catch (requestError) {
+                setAiError(getApiError(requestError, 'Unable to load the selected AI job results.'));
+              }
+            }}
+          >
+            <option value="">Select a previous job</option>
+            {jobs.map((item) => (
+              <option key={item.id} value={item.id}>Job {item.id} · {item.capability} · {item.status}</option>
+            ))}
+          </select>
+        </div>
         {job ? (
           <div className="ai-job-status" aria-live="polite">
             <div className="panel-header">
@@ -448,6 +539,11 @@ export default function RadiologistDashboard() {
               <button type="button" className="secondary-button" onClick={refreshJob}>Refresh status</button>
             </div>
             {job.error ? <ErrorMessage message={job.error} /> : null}
+            {job.status === 'failed' ? (
+              <button type="button" className="secondary-button" onClick={retryJob} disabled={submitting}>
+                {submitting ? 'Retrying...' : 'Retry processing'}
+              </button>
+            ) : null}
             {job.results?.map((result) => (
               <div key={result.id}>
                 <AiResultView result={result} />
@@ -462,16 +558,25 @@ export default function RadiologistDashboard() {
 
       {selectedStudy ? (
         <div className="panel">
-          <div className="panel-header"><h3>Radiology report</h3></div>
+          <div className="panel-header">
+            <h3>Radiology report</h3>
+            {report ? <span>{report.status === 'approved' ? 'Approved' : 'Draft'} · Report {report.id}</span> : <span>New draft</span>}
+          </div>
           <div className="field">
             <label htmlFor="report-findings">Findings</label>
-            <textarea id="report-findings" value={findings} onChange={(event) => setFindings(event.target.value)} rows={6} />
+            <textarea id="report-findings" value={findings} onChange={(event) => setFindings(event.target.value)} rows={6} disabled={report?.status === 'approved'} />
           </div>
           <div className="field">
             <label htmlFor="report-impression">Impression</label>
-            <textarea id="report-impression" value={impression} onChange={(event) => setImpression(event.target.value)} rows={4} />
+            <textarea id="report-impression" value={impression} onChange={(event) => setImpression(event.target.value)} rows={4} disabled={report?.status === 'approved'} />
           </div>
-          <button type="button" className="primary-button" onClick={saveReport}>Save draft</button>
+          {report?.status !== 'approved' ? (
+            <>
+              <button type="button" className="secondary-button" onClick={saveReport}>Save draft</button>
+              <button type="button" className="primary-button" onClick={approveReport} disabled={!report?.id || (!findings.trim() && !impression.trim())}>Approve and finalize</button>
+              {!report?.id ? <p className="muted">Save the draft before approving it.</p> : null}
+            </>
+          ) : <p className="muted">This approved report is finalized and cannot be edited.</p>}
           {reportStatus ? <p role="status">{reportStatus}</p> : null}
         </div>
       ) : null}

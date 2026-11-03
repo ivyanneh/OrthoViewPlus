@@ -103,7 +103,7 @@ export default function Login() {
         </form>
         <p className="login-privacy-note">
           <ShieldIcon size={14} />
-          <span>HIPAA NOTICE: This system is for authorized use only. All access is monitored and logged.</span>
+          <span>Authorized access only. Application activity is monitored and logged.</span>
         </p>
       </section>
     </div>

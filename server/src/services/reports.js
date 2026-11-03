@@ -103,13 +103,25 @@ export function createReportService(db, { notifications } = {}) {
         `UPDATE radiology_reports SET status = 'approved', approved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
       ).run(report.id);
 
-      notifications?.notifyRole('practitioner', {
-        type: 'report_ready',
-        title: 'Radiology report available',
-        message: `An approved report is available for ${report.firstName} ${report.lastName}.`,
-        resourceType: 'report',
-        resourceId: report.id,
-      });
+      const requester = report.imagingRequestId
+        ? db.prepare(
+          `SELECT u.id
+           FROM imaging_requests r
+           JOIN users u ON u.id = r.requested_by
+           WHERE r.id = ? AND r.patient_id = ?
+             AND u.role = 'practitioner' AND u.status = 'active' AND u.restricted = 0`,
+        ).get(report.imagingRequestId, report.patientId)
+        : null;
+      if (requester) {
+        notifications?.create?.({
+          userId: requester.id,
+          type: 'report_ready',
+          title: 'Radiology report available',
+          message: `An approved report is available for ${report.firstName} ${report.lastName}.`,
+          resourceType: 'report',
+          resourceId: report.id,
+        });
+      }
 
       return get(report.id);
     },

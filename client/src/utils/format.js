@@ -71,7 +71,7 @@ export function formatRole(role) {
 export function homePathFor(role) {
   if (role === 'administrator') return '/admin/dashboard';
   if (role === 'radiologist') return '/radiologist/dashboard';
-  return '/practitioner/dashboard';
+  return '/dashboard';
 }
 
 export const APPOINTMENT_STATUS = {

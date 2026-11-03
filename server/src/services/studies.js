@@ -10,6 +10,27 @@ const SELECT = `
   LEFT JOIN patients p ON p.id = s.patient_id
 `;
 
+const REQUEST_MODALITY_CODES = {
+  MRI: ['MR'],
+  'X-RAY': ['CR', 'DX', 'XR', 'RF'],
+  XR: ['CR', 'DX', 'XR', 'RF'],
+};
+
+function modalities(value) {
+  return String(value || '')
+    .split(/[\\,]/)
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function requestMatchesStudyModality(requestModality, studyModality) {
+  const studyCodes = new Set(modalities(studyModality));
+  const requestedCodes = modalities(requestModality).flatMap(
+    (code) => REQUEST_MODALITY_CODES[code] || [code],
+  );
+  return studyCodes.size > 0 && requestedCodes.some((code) => studyCodes.has(code));
+}
+
 export function createStudyService(db) {
   const linkOrthancStudy = db.transaction(({
     patientId,
@@ -21,10 +42,13 @@ export function createStudyService(db) {
     description,
   }) => {
     const request = db.prepare(
-      'SELECT id, patient_id FROM imaging_requests WHERE id = ? AND status != ?',
+      'SELECT id, patient_id, modality FROM imaging_requests WHERE id = ? AND status != ?',
     ).get(Number(imagingRequestId), 'cancelled');
     if (!request || Number(request.patient_id) !== Number(patientId)) {
       throw new AppError('The imaging request does not match the verified study patient.', 409);
+    }
+    if (!requestMatchesStudyModality(request.modality, modality)) {
+      throw new AppError('The imaging request modality does not match the Orthanc study.', 409);
     }
 
     const existing = db.prepare(
@@ -105,6 +129,23 @@ export function createStudyService(db) {
            AND r.status != 'cancelled'
          LIMIT 1`,
       ).get(String(orthancStudyId), Number(radiologistId)));
+    },
+
+    isAssignedToPractitioner(orthancStudyId, practitionerId) {
+      return Boolean(db.prepare(
+        `SELECT 1
+         FROM imaging_studies s
+         JOIN imaging_requests r
+           ON r.id = s.imaging_request_id
+          AND r.patient_id = s.patient_id
+         LEFT JOIN appointments a
+           ON a.id = r.appointment_id
+          AND a.patient_id = r.patient_id
+         WHERE s.orthanc_study_id = ?
+           AND r.status != 'cancelled'
+           AND (r.requested_by = ? OR a.assigned_user_id = ?)
+         LIMIT 1`,
+      ).get(String(orthancStudyId), Number(practitionerId), Number(practitionerId)));
     },
 
     isInternalStudyAssignedToRadiologist(studyId, radiologistId) {

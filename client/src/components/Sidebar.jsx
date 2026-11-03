@@ -21,8 +21,10 @@ const practitionerSections = [
     title: 'Clinical Workspace',
     links: [
       { to: '/dashboard', label: 'Dashboard', Icon: DashboardIcon },
+      { to: '/clinical-workspace', label: 'Patients & Requests', Icon: UsersIcon },
       { to: '/exposure-index', label: 'Exposure Index', Icon: ExposureIcon },
       { to: '/compare-scans', label: 'Compare Scans', Icon: CompareIcon },
+      { to: '/notifications', label: 'Notifications', Icon: BellIcon },
     ],
   },
 ];
@@ -32,9 +34,9 @@ const radiologistSections = [
     title: 'Radiologist Workspace',
     links: [
       { to: '/radiologist/dashboard', label: 'Radiologist Dashboard', Icon: ImageIcon },
-      { to: '/dashboard', label: 'Dashboard', Icon: DashboardIcon },
       { to: '/exposure-index', label: 'Exposure Index', Icon: ExposureIcon },
       { to: '/compare-scans', label: 'Compare Scans', Icon: CompareIcon },
+      { to: '/notifications', label: 'Notifications', Icon: BellIcon },
     ],
   },
 ];
@@ -49,6 +51,7 @@ const adminSections = [
       { to: '/admin/modalities', label: 'Modality Monitoring', Icon: MonitorIcon },
       { to: '/admin/imaging-studies', label: 'Orthanc Study Linking', Icon: ImageIcon },
       { to: '/admin/patients', label: 'Patient Management', Icon: UsersIcon },
+      { to: '/notifications', label: 'Notifications', Icon: BellIcon },
     ],
   },
   {

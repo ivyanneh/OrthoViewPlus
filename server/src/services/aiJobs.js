@@ -106,6 +106,10 @@ export function createAiJobService(db, { aiClient, orthanc, resultsDirectory, au
         },
       });
 
+      const processingRejected = /_(?:rejected|failed)$/.test(String(output.result_kind || ''));
+      const processingError = processingRejected
+        ? String(output.label || output.warnings?.[0] || 'AI processing did not produce an accepted result.')
+        : null;
 
       const fileToken = randomUUID();
       const saved = [];
@@ -142,10 +146,21 @@ export function createAiJobService(db, { aiClient, orthanc, resultsDirectory, au
             output.displayLabel || output.label || jobRow.capability,
           );
         }
-        db.prepare(`UPDATE ai_jobs SET status = 'completed', completed_at = datetime('now'), error = NULL WHERE id = ?`).run(jobId);
+        db.prepare(
+          `UPDATE ai_jobs
+           SET status = ?, completed_at = datetime('now'), error = ?
+           WHERE id = ?`,
+        ).run(processingRejected ? 'failed' : 'completed', processingError, jobId);
       });
       completeJob();
-      audit?.log({ userId: jobRow.requested_by, action: 'ai_job_completed', target: `ai_job:${jobId}`, description: `AI job ${jobId} (${jobRow.capability}) completed.` });
+      audit?.log({
+        userId: jobRow.requested_by,
+        action: processingRejected ? 'ai_job_failed' : 'ai_job_completed',
+        target: `ai_job:${jobId}`,
+        description: processingRejected
+          ? `AI job ${jobId} (${jobRow.capability}) returned a rejected or failed result.`
+          : `AI job ${jobId} (${jobRow.capability}) completed.`,
+      });
     } catch (error) {
       const message = error?.message || 'AI processing failed.';
       db.prepare(`UPDATE ai_jobs SET status = 'failed', completed_at = datetime('now'), error = ? WHERE id = ? AND status = 'running'`).run(message, jobId);

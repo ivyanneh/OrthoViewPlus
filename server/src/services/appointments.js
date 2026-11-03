@@ -56,7 +56,7 @@ export function createAppointmentService(db, { notifications, alerts } = {}) {
     };
   }
 
-  function list({ status, dateFrom, dateTo, patientId, limit = 200 } = {}) {
+  function list({ status, dateFrom, dateTo, patientId, requestedBy, assignedUserId, accessibleToUserId, appointmentIds, limit = 200 } = {}) {
     const clauses = [];
     const params = { limit: Math.min(Math.max(Number(limit) || 200, 1), 500) };
     if (status && status !== 'all') {
@@ -74,6 +74,29 @@ export function createAppointmentService(db, { notifications, alerts } = {}) {
     if (patientId) {
       clauses.push('a.patient_id = @patientId');
       params.patientId = Number(patientId);
+    }
+    if (requestedBy) {
+      clauses.push('a.requested_by = @requestedBy');
+      params.requestedBy = Number(requestedBy);
+    }
+    if (assignedUserId) {
+      clauses.push('a.assigned_user_id = @assignedUserId');
+      params.assignedUserId = Number(assignedUserId);
+    }
+    if (accessibleToUserId) {
+      clauses.push('(a.requested_by = @accessibleToUserId OR a.assigned_user_id = @accessibleToUserId)');
+      params.accessibleToUserId = Number(accessibleToUserId);
+    }
+    if (appointmentIds) {
+      const ids = appointmentIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+      if (!ids.length) {
+        clauses.push('1 = 0');
+      } else {
+        clauses.push(`a.id IN (${ids.map((_, index) => `@appointmentId${index}`).join(', ')})`);
+        ids.forEach((id, index) => {
+          params[`appointmentId${index}`] = id;
+        });
+      }
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     return db

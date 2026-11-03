@@ -13,7 +13,9 @@ export function createDashboardRouter({ orthanc, audit }) {
       });
 
       const summary = await orthanc.getDashboardSummary();
-      const recentAudit = audit.list({ limit: 5 }).entries;
+      const recentAudit = req.user?.role === 'administrator'
+        ? audit.list({ limit: 5 }).entries
+        : [];
 
       res.json({
         ...summary,
