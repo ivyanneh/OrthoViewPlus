@@ -13,8 +13,12 @@ import Alerts from './pages/admin/Alerts.jsx';
 import ModalityMonitoring from './pages/admin/ModalityMonitoring.jsx';
 import SystemAdministration from './pages/admin/SystemAdministration.jsx';
 import AdminProfile from './pages/admin/AdminProfile.jsx';
+import ImagingStudyManagement from './pages/admin/ImagingStudyManagement.jsx';
+import PatientManagement from './pages/admin/PatientManagement.jsx';
 import AdminRoute from './components/AdminRoute.jsx';
 import PractitionerRoute from './components/PractitionerRoute.jsx';
+import RadiologistRoute from './components/RadiologistRoute.jsx';
+import RadiologistDashboard from './pages/RadiologistDashboard.jsx';
 import { useAuth } from './context/AuthContext.jsx';
 import { homePathFor } from './utils/format.js';
 
@@ -32,6 +36,10 @@ const practitionerPages = [
   ['/compare-scans', <CompareScans />],
 ];
 
+const radiologistPages = [
+  ['/radiologist/dashboard', <RadiologistDashboard />],
+];
+
 const adminPages = [
   ['/admin/dashboard', <AdminDashboard />],
   ['/admin/users', <UserManagement />],
@@ -41,6 +49,8 @@ const adminPages = [
   ['/admin/modalities', <ModalityMonitoring />],
   ['/admin/system', <SystemAdministration />],
   ['/admin/profile', <AdminProfile />],
+  ['/admin/imaging-studies', <ImagingStudyManagement />],
+  ['/admin/patients', <PatientManagement />],
 ];
 
 export default function App() {
@@ -57,6 +67,9 @@ export default function App() {
       >
         {practitionerPages.map(([path, element]) => (
           <Route key={path} path={path} element={<PractitionerRoute>{element}</PractitionerRoute>} />
+        ))}
+        {radiologistPages.map(([path, element]) => (
+          <Route key={path} path={path} element={<RadiologistRoute>{element}</RadiologistRoute>} />
         ))}
         {adminPages.map(([path, element]) => (
           <Route key={path} path={path} element={<AdminRoute>{element}</AdminRoute>} />

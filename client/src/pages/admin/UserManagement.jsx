@@ -103,6 +103,7 @@ function UserForm({ user, onClose, onSaved, isSelf }) {
             <label htmlFor="user-role">Role</label>
             <select id="user-role" value={form.role} onChange={update('role')} disabled={isSelf}>
               <option value="practitioner">Healthcare Practitioner</option>
+              <option value="radiologist">Radiologist</option>
               <option value="administrator">Administrator</option>
             </select>
             {isSelf ? <span className="field-hint">You cannot change your own role.</span> : null}
@@ -309,6 +310,7 @@ export default function UserManagement() {
               <option value="all">All roles</option>
               <option value="administrator">Administrator</option>
               <option value="practitioner">Healthcare Practitioner</option>
+              <option value="radiologist">Radiologist</option>
             </select>
           </div>
           <div className="field inline-field">

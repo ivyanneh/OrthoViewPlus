@@ -1,20 +1,112 @@
 import bcrypt from 'bcryptjs';
 
+function upsertUser(db, { username, password, role, fullName, department }) {
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  if (existing) {
+    return { created: false, id: existing.id };
+  }
+  const result = db
+    .prepare(
+      `INSERT INTO users (username, password_hash, role, full_name, department, status, restricted, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'active', 0, datetime('now'))`,
+    )
+    .run(username, bcrypt.hashSync(password, 10), role, fullName, department);
+  return { created: true, id: result.lastInsertRowid };
+}
+
 export function seedDevelopmentAdmin(db, { username, password }) {
   if (!username || !password) {
     return { created: false, reason: 'missing-credentials' };
   }
+  return upsertUser(db, {
+    username,
+    password,
+    role: 'administrator',
+    fullName: 'Development Administrator',
+    department: 'Administration',
+  });
+}
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
-  if (existing) {
-    return { created: false, reason: 'exists' };
+export function seedDemoAccounts(db, accounts = {}) {
+  const created = [];
+  if (accounts.adminUsername && accounts.adminPassword) {
+    created.push(
+      seedDevelopmentAdmin(db, { username: accounts.adminUsername, password: accounts.adminPassword }),
+    );
+  }
+  if (accounts.practitionerUsername && accounts.practitionerPassword) {
+    created.push(
+      upsertUser(db, {
+        username: accounts.practitionerUsername,
+        password: accounts.practitionerPassword,
+        role: 'practitioner',
+        fullName: 'Demo Practitioner',
+        department: 'Outpatients',
+      }),
+    );
+  }
+  if (accounts.radiologistUsername && accounts.radiologistPassword) {
+    created.push(
+      upsertUser(db, {
+        username: accounts.radiologistUsername,
+        password: accounts.radiologistPassword,
+        role: 'radiologist',
+        fullName: 'Demo Radiologist',
+        department: 'Radiology',
+      }),
+    );
+  }
+  return created;
+}
+
+export function seedDemoClinicalData(db) {
+  if (db.prepare('SELECT COUNT(*) AS total FROM patients').get().total > 0) {
+    return { seeded: false };
   }
 
-  const passwordHash = bcrypt.hashSync(password, 10);
-  db.prepare(
-    `INSERT INTO users (username, password_hash, role)
-     VALUES (?, ?, ?)`,
-  ).run(username, passwordHash, 'administrator');
+  const admin = db.prepare(`SELECT id FROM users WHERE role = 'administrator' LIMIT 1`).get();
+  const practitioner = db.prepare(`SELECT id FROM users WHERE role = 'practitioner' LIMIT 1`).get();
+  const radiologist = db.prepare(`SELECT id FROM users WHERE role = 'radiologist' LIMIT 1`).get();
+  const createdBy = admin?.id ?? practitioner?.id ?? null;
 
-  return { created: true };
+  const insertPatient = db.prepare(
+    `INSERT INTO patients (mrn, first_name, last_name, date_of_birth, sex, notes, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const chest = insertPatient.run(
+    'DEMO-CHEST-001',
+    'Amina',
+    'Demo',
+    '1978-04-12',
+    'F',
+    'De-identified demonstration record for chest radiography workflows. Not a real patient.',
+    createdBy,
+  );
+  const foot = insertPatient.run(
+    'DEMO-FOOT-002',
+    'Joseph',
+    'Demo',
+    '1969-11-03',
+    'M',
+    'De-identified demonstration record for extremity coverage assessment. Not a real patient.',
+    createdBy,
+  );
+
+  const insertAppointment = db.prepare(
+    `INSERT INTO appointments (patient_id, scheduled_date, scheduled_time, examination, modality, assigned_user_id, requested_by, status, notes, created_by)
+     VALUES (?, date('now', ?), ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertAppointment.run(chest.lastInsertRowid, '+1 day', '09:30', 'Chest PA', 'XR', radiologist?.id ?? null, practitioner?.id ?? null, 'scheduled', 'Demo scheduled examination.', createdBy);
+  insertAppointment.run(foot.lastInsertRowid, '-1 day', '14:00', 'Foot AP', 'XR', radiologist?.id ?? null, practitioner?.id ?? null, 'completed', 'Demo completed examination.', createdBy);
+  insertAppointment.run(chest.lastInsertRowid, '-3 day', '11:15', 'Chest PA', 'XR', radiologist?.id ?? null, practitioner?.id ?? null, 'missed', 'Demo missed examination.', createdBy);
+  insertAppointment.run(foot.lastInsertRowid, '-2 day', '08:00', 'Foot oblique', 'XR', null, practitioner?.id ?? null, 'cancelled', 'Demo cancelled examination.', createdBy);
+
+  if (practitioner?.id) {
+    db.prepare(
+      `INSERT INTO imaging_requests (patient_id, requested_by, assigned_radiologist_id, examination, modality, priority, clinical_indication, status)
+       VALUES (?, ?, ?, 'Chest PA', 'XR', 'routine', 'Cough. Demonstration request only.', 'submitted')`,
+    ).run(chest.lastInsertRowid, practitioner.id, radiologist?.id ?? null);
+  }
+
+  return { seeded: true };
 }

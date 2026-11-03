@@ -40,6 +40,15 @@ test('database initializes required application tables', () => {
       'audit_logs',
       'imaging_schedule',
       'alerts',
+      'patients',
+      'appointments',
+      'imaging_requests',
+      'imaging_studies',
+      'radiology_reports',
+      'notifications',
+      'ai_jobs',
+      'ai_results',
+      'patient_dicom_mappings',
     ]) {
       assert.ok(tables.includes(table), `Missing table: ${table}`);
     }

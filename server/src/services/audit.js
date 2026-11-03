@@ -11,8 +11,10 @@ export const AUDIT_CATEGORIES = {
     'user_restrict',
     'user_unrestrict',
   ],
-  study_access: ['view_exposure_index', 'view_compare_scans', 'compare_scans'],
-  scheduling: ['schedule_create', 'schedule_update', 'schedule_status_change'],
+  study_access: ['view_exposure_index', 'view_compare_scans', 'compare_scans', 'view_studies', 'view_study', 'patient_view'],
+  scheduling: ['schedule_create', 'schedule_update', 'schedule_status_change', 'appointment_create', 'appointment_status'],
+  reporting: ['report_draft', 'report_approve', 'imaging_request_create', 'imaging_request_assign'],
+  ai: ['ai_job_queued', 'ai_job_completed', 'ai_job_failed', 'ai_result_reviewed'],
   alerts: ['alert_review'],
   administration: [
     'view_dashboard',
@@ -23,6 +25,14 @@ export const AUDIT_CATEGORIES = {
     'view_alerts',
     'view_modality_monitoring',
     'view_system_administration',
+  ],
+  patient_management: [
+    'admin_patient_list',
+    'admin_patient_view',
+    'admin_patient_create',
+    'admin_patient_update',
+    'admin_patient_archive',
+    'admin_patient_activate',
   ],
 };
 
@@ -53,7 +63,7 @@ export function createAuditService(db) {
 
     if (role === 'system') {
       clauses.push('users.id IS NULL');
-    } else if (role === 'administrator' || role === 'practitioner') {
+    } else if (role === 'administrator' || role === 'practitioner' || role === 'radiologist') {
       clauses.push('users.role = @role');
       params.role = role;
     }
