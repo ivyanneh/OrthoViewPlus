@@ -7,7 +7,7 @@ from app.processing.completeness import assess_completeness
 from app.processing.reconstruct import reconstruct
 from app.processing.restore import restore_image
 from app.processing.segment3d import segment_volume
-from app.processing.synthetic import generate_synthetic
+from app.processing.synthetic import MAX_SYNTHETIC_SEED, generate_synthetic
 
 router = APIRouter()
 MAX_SINGLE_UPLOAD_BYTES = 32 * 1024 * 1024
@@ -91,9 +91,18 @@ async def segment(volume: list[UploadFile] = File(default=[])):
 
 @router.post("/generate-synthetic")
 async def synthetic(notes: str = Form("7")):
-    try:
-        seed = int(notes) if str(notes).isdigit() else 7
-    except ValueError:
+    seed_text = str(notes).strip()
+    if seed_text.lstrip("+-").isdigit() and seed_text not in ("+", "-"):
+        try:
+            seed = int(seed_text)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Seed must be between 0 and {MAX_SYNTHETIC_SEED}.",
+            ) from error
+        if seed < 0 or seed > MAX_SYNTHETIC_SEED:
+            raise HTTPException(status_code=400, detail=f"Seed must be between 0 and {MAX_SYNTHETIC_SEED}.")
+    else:
         seed = 7
     return generate_synthetic(seed)
 

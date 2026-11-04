@@ -265,6 +265,59 @@ abbr {
   color: var(--accent);
 }
 
+.nav-group-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-link[aria-expanded="true"] svg:last-child {
+  transform: rotate(90deg);
+}
+
+.nav-submenu {
+  display: flex;
+  flex-direction: column;
+  padding-left: 2.5rem;
+  margin-top: 2px;
+  gap: 1px;
+}
+
+.nav-submenu-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 0.65rem;
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.nav-submenu-link:hover {
+  background: rgba(148, 163, 184, 0.07);
+  color: var(--ink);
+}
+
+.nav-submenu-link.active {
+  background: var(--surface-3);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.nav-submenu-link.active::before {
+  content: "";
+  position: absolute;
+  left: -0.65rem;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
 .sidebar-footer {
   flex-shrink: 0;
   display: flex;

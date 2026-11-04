@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from skimage import measure
 
-from .io_utils import decode_upload
+from .io_utils import MAX_IMAGE_PIXELS, decode_upload, inspect_dicom_header
 
 METHOD = {
     "name": "Intensity isosurface (marching cubes) on a validated DICOM volume",
@@ -40,6 +40,23 @@ def segment_volume(files: list[bytes]) -> dict:
             {"slice_count": len(files)},
         )
 
+    headers = [inspect_dicom_header(item) for item in files]
+    dicom_headers = [header for header in headers if header is not None]
+    declared_voxels = sum(header["rows"] * header["columns"] for header in dicom_headers)
+    if declared_voxels > MAX_IMAGE_PIXELS:
+        return _rejected(
+            "3D visualisation unavailable — volume exceeds memory limit",
+            "The volume exceeds the 64-million-voxel processing limit.",
+        )
+    if len(dicom_headers) == len(files):
+        dimensions = {(header["rows"], header["columns"]) for header in dicom_headers}
+        if len(dimensions) != 1:
+            return _rejected(
+                "3D visualisation unavailable — incompatible slice dimensions",
+                "All slices must be single-frame images with identical rows and columns.",
+                {"slice_shapes": [[header["rows"], header["columns"]] for header in dicom_headers]},
+            )
+
     decoded = [decode_upload(item) for item in files]
     slices = [image for image, _metadata in decoded]
     metadata = [item_metadata for _image, item_metadata in decoded]
@@ -48,6 +65,23 @@ def segment_volume(files: list[bytes]) -> dict:
             "3D visualisation unavailable — DICOM volume required",
             "Every volume slice must be a DICOM image with spatial metadata.",
         )
+
+    for metadata_key, field_name in (
+        ("patient_id", "PatientID"),
+        ("study_instance_uid", "StudyInstanceUID"),
+        ("series_instance_uid", "SeriesInstanceUID"),
+    ):
+        identifiers = [str(item.get(metadata_key) or "").strip() for item in metadata]
+        if any(not identifier for identifier in identifiers):
+            return _rejected(
+                "3D visualisation unavailable — missing DICOM identity",
+                f"Every volume slice must provide a non-empty {field_name}.",
+            )
+        if len(set(identifiers)) != 1:
+            return _rejected(
+                "3D visualisation unavailable — inconsistent DICOM identity",
+                f"All volume slices must have the same {field_name}.",
+            )
 
     modalities = {item.get("modality") for item in metadata}
     if len(modalities) != 1 or not modalities.issubset({"CT", "MR"}):
@@ -64,7 +98,7 @@ def segment_volume(files: list[bytes]) -> dict:
             "All slices must be single-frame images with identical rows and columns.",
             {"slice_shapes": [list(image.shape) for image in slices]},
         )
-    if len(slices) * int(shape[0]) * int(shape[1]) > 64 * 1024 * 1024:
+    if len(slices) * int(shape[0]) * int(shape[1]) > MAX_IMAGE_PIXELS:
         return _rejected(
             "3D visualisation unavailable — volume exceeds memory limit",
             "The volume exceeds the 64-million-voxel processing limit.",
@@ -97,6 +131,13 @@ def segment_volume(files: list[bytes]) -> dict:
             "DICOM slice orientation vectors must be unit-length and perpendicular.",
         )
     normal = np.cross(column_direction, row_direction)
+    normal_magnitude = np.linalg.norm(normal)
+    if not np.isfinite(normal_magnitude) or normal_magnitude <= 0:
+        return _rejected(
+            "3D visualisation unavailable — invalid slice orientation",
+            "DICOM slice orientation does not define a finite, non-zero slice normal.",
+        )
+    normal /= normal_magnitude
     positions_array = np.asarray(positions, dtype=np.float64)
     projections = positions_array @ normal
     order = np.argsort(projections)
@@ -116,6 +157,14 @@ def segment_volume(files: list[bytes]) -> dict:
             "3D visualisation unavailable — irregular slice spacing",
             "Slice spacing varies by more than 20%; the volume cannot be safely stacked.",
             {"slice_spacing_mm": differences.tolist()},
+        )
+    origin_displacements = np.diff(sorted_positions, axis=0)
+    expected_displacements = differences[:, None] * normal
+    in_plane_residuals = origin_displacements - expected_displacements
+    if np.any(np.linalg.norm(in_plane_residuals, axis=1) > 1e-3):
+        return _rejected(
+            "3D visualisation unavailable — inconsistent in-plane slice positions",
+            "Slice origins have in-plane shifts; gantry tilt or shifted slices are not supported.",
         )
 
     pixel_spacing = np.asarray(spacings[0], dtype=np.float64)

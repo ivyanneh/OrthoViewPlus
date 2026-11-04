@@ -246,12 +246,20 @@ function migrateUsers(db) {
   const columns = [
     ['full_name', 'TEXT'],
     ['email', 'TEXT'],
+    ['phone', 'TEXT'],
+    ['professional_title', 'TEXT'],
+    ['specialisation', 'TEXT'],
     ['department', 'TEXT'],
+    ['facility', 'TEXT'],
+    ['registration_number', 'TEXT'],
     ['status', "TEXT NOT NULL DEFAULT 'active'"],
     ['restricted', 'INTEGER NOT NULL DEFAULT 0'],
     ['restriction_reason', 'TEXT'],
     ['updated_at', 'TEXT'],
     ['last_login_at', 'TEXT'],
+    ['token_version', 'INTEGER NOT NULL DEFAULT 0'],
+    ['theme_preference', "TEXT DEFAULT 'light'"],
+    ['notification_preference', 'INTEGER NOT NULL DEFAULT 1'],
   ];
 
   for (const [name, definition] of columns) {

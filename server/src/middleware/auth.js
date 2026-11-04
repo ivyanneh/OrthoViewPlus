@@ -28,6 +28,9 @@ export function createAuthMiddleware(jwtSecret, { getAuthState } = {}) {
       if (!account || account.status !== 'active' || account.restricted) {
         return res.status(401).json({ error: 'This account is no longer permitted to sign in.' });
       }
+      if (Number(payload.tokenVersion ?? 0) !== Number(account.tokenVersion)) {
+        return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
+      }
       req.user = { id: account.id, username: account.username, role: account.role };
     }
 

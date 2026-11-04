@@ -21,9 +21,23 @@ import AdminRoute from './components/AdminRoute.jsx';
 import PractitionerRoute from './components/PractitionerRoute.jsx';
 import ClinicalRoute from './components/ClinicalRoute.jsx';
 import RadiologistRoute from './components/RadiologistRoute.jsx';
+import PractitionerDashboard from './pages/PractitionerDashboard.jsx';
+import PractitionerScans from './pages/PractitionerScans.jsx';
+import PractitionerRequests from './pages/PractitionerRequests.jsx';
+import PractitionerProfile from './pages/PractitionerProfile.jsx';
+import PractitionerSettings from './pages/PractitionerSettings.jsx';
 import RadiologistDashboard from './pages/RadiologistDashboard.jsx';
+import RadiologistWorkspaceDashboard from './pages/RadiologistWorkspaceDashboard.jsx';
+import ScansImaging from './pages/ScansImaging.jsx';
+import ImagingRequests from './pages/ImagingRequests.jsx';
+import SavedDrafts from './pages/SavedDrafts.jsx';
+import RadiologistProfile from './pages/RadiologistProfile.jsx';
+import AccountSettings from './pages/AccountSettings.jsx';
+import AiWorkbench from './pages/AiWorkbench.jsx';
+import ScanComparisons from './pages/ScanComparisons.jsx';
 import { useAuth } from './context/AuthContext.jsx';
 import { homePathFor } from './utils/format.js';
+import AdminSettings from './pages/admin/AdminSettings.jsx';
 
 function HomeRedirect() {
   const { isAuthenticated, ready, user } = useAuth();
@@ -34,8 +48,11 @@ function HomeRedirect() {
 }
 
 const practitionerPages = [
-  ['/dashboard', <Dashboard />],
-  ['/clinical-workspace', <PractitionerWorkspace />],
+  ['/practitioner/dashboard', <PractitionerDashboard />],
+  ['/practitioner/scans', <PractitionerScans />],
+  ['/practitioner/requests', <PractitionerRequests />],
+  ['/practitioner/profile', <PractitionerProfile />],
+  ['/practitioner/settings', <PractitionerSettings />],
 ];
 
 const clinicalPages = [
@@ -43,7 +60,21 @@ const clinicalPages = [
   ['/compare-scans', <CompareScans />],
 ];
 const radiologistPages = [
-  ['/radiologist/dashboard', <RadiologistDashboard />],
+  ['/dashboard', <RadiologistWorkspaceDashboard />],
+  ['/scans', <ScansImaging />],
+  ['/ai-tools', <AiWorkbench />],
+  ['/ai-tools/restore', <AiWorkbench />],
+  ['/ai-tools/completeness', <AiWorkbench />],
+  ['/ai-tools/compare', <AiWorkbench />],
+  ['/ai-tools/reconstruct', <AiWorkbench />],
+  ['/ai-tools/segment3d', <AiWorkbench />],
+  ['/ai-tools/synthetic', <AiWorkbench />],
+  ['/ai-tools/complementary', <AiWorkbench />],
+  ['/scan-comparisons', <ScanComparisons />],
+  ['/imaging-requests', <ImagingRequests />],
+  ['/drafts', <SavedDrafts />],
+  ['/profile', <RadiologistProfile />],
+  ['/settings', <AccountSettings />],
 ];
 
 const adminPages = [
@@ -57,6 +88,7 @@ const adminPages = [
   ['/admin/profile', <AdminProfile />],
   ['/admin/imaging-studies', <ImagingStudyManagement />],
   ['/admin/patients', <PatientManagement />],
+  ['/admin/settings', <AdminSettings />],
 ];
 
 export default function App() {

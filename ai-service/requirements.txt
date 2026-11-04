@@ -1,10 +1,11 @@
-fastapi==0.115.12
+fastapi==0.162.0
+starlette==1.10.0
 uvicorn[standard]==0.34.2
-python-multipart==0.0.20
+python-multipart==0.0.33
 numpy==2.2.4
 opencv-python-headless==4.11.0.86
-pydicom==3.0.1
-Pillow==11.2.1
+pydicom==3.0.2
+Pillow==13.0.0
 scikit-image==0.25.2
-pytest==8.3.5
+pytest==9.2.0
 httpx==0.28.1

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
+import Database from 'better-sqlite3';
 
 import { createDatabase } from '../src/db.js';
 import { seedDevelopmentAdmin } from '../src/seed.js';
@@ -59,6 +60,32 @@ test('database enables foreign-key enforcement', () => {
   withTemporaryDatabase((db) => {
     assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
   });
+});
+
+test('database adds token versioning to existing user records', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'orthoviewplus-legacy-db-'));
+  const databasePath = path.join(directory, 'legacy.db');
+  const legacyDb = new Database(databasePath);
+  legacyDb.exec(`
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'practitioner',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO users (username, password_hash) VALUES ('legacy-user', 'test-hash');
+  `);
+  legacyDb.close();
+
+  const db = createDatabase(databasePath);
+  try {
+    assert.equal(db.prepare('SELECT token_version AS version FROM users WHERE username = ?').get('legacy-user').version, 0);
+    assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('administrator password is stored as a bcrypt hash', () => {

@@ -248,3 +248,19 @@ export function DatabaseIcon(props) {
     </Svg>
   );
 }
+
+export function ChevronDownIcon(props) {
+  return (
+    <Svg {...props}>
+      <path d="M6 9l6 6 6-6" />
+    </Svg>
+  );
+}
+
+export function ChevronRightIcon(props) {
+  return (
+    <Svg {...props}>
+      <path d="M9 18l6-6-6-6" />
+    </Svg>
+  );
+}

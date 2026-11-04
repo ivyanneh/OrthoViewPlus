@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AppError } from '../utils/http.js';
 import { writeResultFile } from './aiClient.js';
+import { logSafeError } from '../utils/safeLogging.js';
 
 const SELECT_JOB = `
   SELECT j.id, j.capability, j.status, j.requested_by AS requestedBy, j.patient_id AS patientId,
@@ -162,9 +163,10 @@ export function createAiJobService(db, { aiClient, orthanc, resultsDirectory, au
           : `AI job ${jobId} (${jobRow.capability}) completed.`,
       });
     } catch (error) {
-      const message = error?.message || 'AI processing failed.';
+      const message = 'AI processing failed. Please retry or contact an administrator.';
       db.prepare(`UPDATE ai_jobs SET status = 'failed', completed_at = datetime('now'), error = ? WHERE id = ? AND status = 'running'`).run(message, jobId);
-      audit?.log({ userId: jobRow.requested_by, action: 'ai_job_failed', target: `ai_job:${jobId}`, description: `AI job ${jobId} failed: ${message}` });
+      logSafeError('AI processing failed', error);
+      audit?.log({ userId: jobRow.requested_by, action: 'ai_job_failed', target: `ai_job:${jobId}`, description: `AI job ${jobId} failed.` });
     }
   }
 
@@ -174,7 +176,7 @@ export function createAiJobService(db, { aiClient, orthanc, resultsDirectory, au
       if (running.has(jobId)) continue;
       running.add(jobId);
       activeCount += 1;
-      runJob(jobId).catch((error) => console.error('AI job failed', error)).finally(() => {
+      runJob(jobId).catch((error) => logSafeError('AI job failed unexpectedly', error)).finally(() => {
         running.delete(jobId);
         activeCount = Math.max(0, activeCount - 1);
         pump();

@@ -86,7 +86,13 @@ export function createUserService(db) {
     },
 
     getAuthState(id) {
-      return db.prepare('SELECT id, username, role, status, restricted FROM users WHERE id = ?').get(Number(id)) ?? null;
+      return db.prepare(
+        'SELECT id, username, role, status, restricted, token_version AS tokenVersion FROM users WHERE id = ?',
+      ).get(Number(id)) ?? null;
+    },
+
+    revokeTokens(id) {
+      return db.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(Number(id)).changes > 0;
     },
 
     create({ username, password, role, fullName, email, department }) {

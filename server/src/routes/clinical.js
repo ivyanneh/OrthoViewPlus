@@ -413,5 +413,56 @@ export function createClinicalRouter({
     }),
   );
 
+  router.get(
+    '/users/me',
+    handleRoute((req, res) => {
+      const user = users.get(req.user.id);
+      res.json({ user });
+    }),
+  );
+
+  router.patch(
+    '/users/me',
+    handleRoute((req, res) => {
+      const user = users.update(req.user.id, req.body || {});
+      log(req, 'profile_update', `user:${user.id}`, 'updated their profile.');
+      res.json({ user });
+    }),
+  );
+
+  router.post(
+    '/users/change-password',
+    handleRoute(async (req, res) => {
+      const { currentPassword, newPassword } = req.body || {};
+      
+      if (!currentPassword || !newPassword) {
+        throw new AppError('Current password and new password are required.', 400);
+      }
+      
+      if (newPassword.length < 8) {
+        throw new AppError('New password must be at least 8 characters long.', 400);
+      }
+      
+      const user = users.get(req.user.id);
+      const bcrypt = (await import('bcryptjs')).default;
+      const passwordValid = bcrypt.compareSync(currentPassword, user.password_hash);
+      
+      if (!passwordValid) {
+        throw new AppError('Current password is incorrect.', 401);
+      }
+      
+      const newPasswordHash = bcrypt.hashSync(newPassword, 10);
+      const newTokenVersion = (user.token_version || 0) + 1;
+      
+      users.update(req.user.id, {
+        password_hash: newPasswordHash,
+        token_version: newTokenVersion,
+      });
+      
+      log(req, 'password_change', `user:${req.user.id}`, 'changed their password.');
+      res.json({ ok: true });
+    }),
+  );
+
   return router;
 }

@@ -31,6 +31,8 @@ import { createStudyService } from './services/studies.js';
 import { createPatientMappingService } from './services/patientMappings.js';
 import { createAiClient } from './services/aiClient.js';
 import { createAiJobService } from './services/aiJobs.js';
+import { validateJwtSecret } from './utils/runtimeConfig.js';
+import { logSafeError } from './utils/safeLogging.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -38,18 +40,10 @@ dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const PORT = Number(process.env.PORT) || 3001;
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = validateJwtSecret(process.env.JWT_SECRET);
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
 const DATABASE_PATH = path.resolve(__dirname, '..', process.env.DATABASE_PATH || './data/orthoviewplus.db');
 const AI_RESULTS_DIR = path.resolve(__dirname, '..', process.env.AI_RESULTS_DIR || './data/ai-results');
-
-if (!JWT_SECRET || JWT_SECRET === 'change-this-to-a-long-random-string') {
-  console.warn('Warning: JWT_SECRET is missing or still set to the example value. Set a unique secret before deployment.');
-}
-
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET must be set in server/.env or the project .env file.');
-}
 
 const db = createDatabase(DATABASE_PATH);
 const seedResult = seedDemoAccounts(db, {
@@ -100,7 +94,7 @@ setInterval(() => {
   try {
     appointments.processOverdue();
   } catch (error) {
-    console.error('Appointment status processor failed:', error.message);
+    logSafeError('Appointment status processor failed', error);
   }
 }, 60 * 1000).unref();
 
@@ -123,7 +117,7 @@ app.use('/api/imaging', requireAuth, requireImagingAccess, createImagingRouter({
 app.use('/api/ai', requireAuth, requireAiAccess, createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patientMappings, resultsDirectory: AI_RESULTS_DIR }));
 
 app.use((err, _req, res, _next) => {
-  console.error(err);
+  logSafeError('Unhandled request error', err);
   res.status(500).json({ error: 'An unexpected server error occurred.' });
 });
 

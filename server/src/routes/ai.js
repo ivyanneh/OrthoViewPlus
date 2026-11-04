@@ -49,12 +49,7 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
   }
 
   async function getInstanceStudy(instanceId) {
-    const instance = await orthanc.getInstance(instanceId);
-    if (!instance?.ParentStudy) throw new AppError('Unable to resolve the instance study.', 404);
-    const tags = await orthanc.getInstanceTags(instanceId);
-    const patientId = tags?.PatientID ?? tags?.patientId ?? null;
-    if (!patientId) throw new AppError('Unable to determine DICOM PatientID for this study.', 400);
-    return { orthancStudyId: String(instance.ParentStudy), patientId: String(patientId) };
+    return orthanc.getInstanceStudy(instanceId);
   }
 
   async function getSeriesStudy(seriesId) {
@@ -152,6 +147,9 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
     const selected = instanceId
       ? await getInstanceStudy(instanceId)
       : await getSeriesStudy(seriesId);
+    if (!selected.patientId) {
+      throw new AppError('The selected DICOM instance does not contain a PatientID.', 409);
+    }
     if (instanceId && seriesId) {
       const selectedSeries = await getSeriesStudy(seriesId);
       if (selected.orthancStudyId !== selectedSeries.orthancStudyId) {
@@ -169,6 +167,9 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
 
     if (priorInstanceId) {
       const priorStudy = await getInstanceStudy(priorInstanceId);
+      if (!priorStudy.patientId) {
+        throw new AppError('The prior DICOM instance does not contain a PatientID.', 409);
+      }
       if (priorStudy.orthancStudyId === selected.orthancStudyId) {
         throw new AppError('Select a prior instance from a different authorized study.', 409);
       }

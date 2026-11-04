@@ -4,6 +4,8 @@ import numpy as np
 
 from .io_utils import to_base64
 
+MAX_SYNTHETIC_SEED = (1 << 128) - 1
+
 METHOD = {
     "name": "Procedural radiographic phantom generator",
     "library": "NumPy",
@@ -13,7 +15,10 @@ METHOD = {
 
 
 def generate_synthetic(seed: int = 7) -> dict:
-    rng = np.random.default_rng(int(seed))
+    seed = int(seed)
+    if seed < 0 or seed > MAX_SYNTHETIC_SEED:
+        raise ValueError(f"Seed must be between 0 and {MAX_SYNTHETIC_SEED}.")
+    rng = np.random.default_rng(seed)
     height, width = 512, 512
     yy, xx = np.mgrid[0:height, 0:width]
     image = np.full((height, width), 18.0)

@@ -56,6 +56,21 @@ const pageMeta = {
     title: 'Administrator Profile',
     description: 'Your account information.',
   },
+  // Radiologist workspace pages - no description
+  '/scans': { title: 'Scans & Imaging', description: '' },
+  '/ai-tools': { title: 'AI Imaging Tools', description: '' },
+  '/ai-tools/restore': { title: 'Image Restoration', description: '' },
+  '/ai-tools/completeness': { title: 'Completeness Assessment', description: '' },
+  '/ai-tools/compare': { title: 'Longitudinal Comparison', description: '' },
+  '/ai-tools/reconstruct': { title: 'Image Reconstruction', description: '' },
+  '/ai-tools/segment3d': { title: '3D Visualization', description: '' },
+  '/ai-tools/synthetic': { title: 'Synthetic Generation', description: '' },
+  '/ai-tools/complementary': { title: 'Complementary-View Synthesis', description: '' },
+  '/scan-comparisons': { title: 'Scan Comparisons', description: '' },
+  '/imaging-requests': { title: 'Imaging Requests', description: '' },
+  '/drafts': { title: 'Saved Drafts', description: '' },
+  '/profile': { title: 'My Profile', description: '' },
+  '/settings': { title: 'Account Settings', description: '' },
 };
 
 function sectionFor(pathname) {
@@ -84,7 +99,7 @@ export default function Layout() {
           <div className="topbar-title">
             <span className="topbar-crumb">{sectionFor(pathname)}</span>
             <h2>{meta.title}</h2>
-            {meta.description ? <p>{meta.description}</p> : null}
+            {meta.description && user?.role !== 'radiologist' ? <p>{meta.description}</p> : null}
           </div>
           <div className="topbar-meta">
             <span className="topbar-date">{todayLabel()}</span>

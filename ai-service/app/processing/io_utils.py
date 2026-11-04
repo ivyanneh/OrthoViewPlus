@@ -13,6 +13,9 @@ except ImportError:  # pragma: no cover
     pydicom = None
 
 
+MAX_IMAGE_PIXELS = 64 * 1024 * 1024
+
+
 def _vector(value, length: int) -> list[float] | None:
     if value is None:
         return None
@@ -23,6 +26,55 @@ def _vector(value, length: int) -> list[float] | None:
         return None
 
 
+def _positive_dicom_int(value, name: str) -> int:
+    try:
+        result = int(str(value).strip())
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"DICOM {name} must be a positive integer.") from error
+    if result <= 0:
+        raise ValueError(f"DICOM {name} must be a positive integer.")
+    return result
+
+
+def _dicom_header_dimensions(dataset) -> dict[str, int]:
+    if "Rows" not in dataset or "Columns" not in dataset:
+        raise ValueError("DICOM Rows and Columns are required.")
+    rows = _positive_dicom_int(dataset.Rows, "Rows")
+    columns = _positive_dicom_int(dataset.Columns, "Columns")
+    number_of_frames = _positive_dicom_int(getattr(dataset, "NumberOfFrames", 1), "NumberOfFrames")
+    if number_of_frames != 1:
+        raise ValueError("Multiframe or non-2D DICOM images are not supported by this capability.")
+    samples_per_pixel = _positive_dicom_int(getattr(dataset, "SamplesPerPixel", 1), "SamplesPerPixel")
+    if samples_per_pixel != 1:
+        raise ValueError("Multiframe or non-2D DICOM images are not supported by this capability.")
+    if rows * columns > MAX_IMAGE_PIXELS:
+        raise ValueError("DICOM image dimensions exceed the processing limit.")
+    return {"rows": rows, "columns": columns, "samples_per_pixel": samples_per_pixel}
+
+
+def inspect_dicom_header(data: bytes) -> dict[str, int] | None:
+    """Read DICOM image dimensions without loading or decoding pixel data."""
+    if not data or pydicom is None:
+        return None
+    try:
+        dataset = pydicom.dcmread(io.BytesIO(data), force=True, stop_before_pixels=True)
+    except (OSError, AttributeError, TypeError):
+        return None
+    image_tags = (
+        "SOPClassUID",
+        "Rows",
+        "Columns",
+        "NumberOfFrames",
+        "SamplesPerPixel",
+        "PhotometricInterpretation",
+        "BitsAllocated",
+        "PixelRepresentation",
+    )
+    if not any(tag in dataset for tag in image_tags):
+        return None
+    return _dicom_header_dimensions(dataset)
+
+
 def decode_upload(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
     """Decode DICOM bytes or a standard image into an 8-bit grayscale array."""
     if not data:
@@ -31,12 +83,13 @@ def decode_upload(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
     if pydicom is not None:
         try:
             dataset = pydicom.dcmread(io.BytesIO(data), force=True)
-            if hasattr(dataset, "pixel_array"):
+            if any(tag in dataset for tag in ("PixelData", "FloatPixelData", "DoubleFloatPixelData")):
+                dimensions = _dicom_header_dimensions(dataset)
                 pixels = dataset.pixel_array.astype(np.float32)
                 if pixels.ndim != 2:
                     raise ValueError("Multiframe or non-2D DICOM images are not supported by this capability.")
-                if pixels.size > 64 * 1024 * 1024:
-                    raise ValueError("DICOM image dimensions exceed the processing limit.")
+                if pixels.shape != (dimensions["rows"], dimensions["columns"]):
+                    raise ValueError("DICOM pixel data dimensions do not match Rows and Columns.")
                 slope = float(getattr(dataset, "RescaleSlope", 1) or 1)
                 intercept = float(getattr(dataset, "RescaleIntercept", 0) or 0)
                 pixels = pixels * slope + intercept
@@ -51,6 +104,7 @@ def decode_upload(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
                     "modality": str(getattr(dataset, "Modality", "") or ""),
                     "sop_instance_uid": str(getattr(dataset, "SOPInstanceUID", "") or ""),
                     "study_instance_uid": str(getattr(dataset, "StudyInstanceUID", "") or ""),
+                    "series_instance_uid": str(getattr(dataset, "SeriesInstanceUID", "") or ""),
                     "rows": int(display.shape[0]),
                     "columns": int(display.shape[1]),
                     "photometric": photometric,

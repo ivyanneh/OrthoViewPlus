@@ -254,7 +254,7 @@ export default function RadiologistDashboard() {
           examType: selectedRequest?.examination || '',
           bodyPart: selectedRequest?.examination || '',
         } : {}),
-      });
+      }, { timeout: 120000 });
       setJob(response.data.job);
       setJobs((current) => [response.data.job, ...current.filter((item) => item.id !== response.data.job.id)]);
     } catch (requestError) {
@@ -324,7 +324,7 @@ export default function RadiologistDashboard() {
     setAiError('');
     setSubmitting(true);
     try {
-      const response = await api.post(`/ai/jobs/${job.id}/retry`);
+      const response = await api.post(`/ai/jobs/${job.id}/retry`, undefined, { timeout: 120000 });
       setJob(response.data.job);
       setJobs((current) => current.map((item) => item.id === response.data.job.id ? response.data.job : item));
     } catch (requestError) {

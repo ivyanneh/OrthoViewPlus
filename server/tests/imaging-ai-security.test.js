@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import jwt from 'jsonwebtoken';
 
 import { createDatabase } from '../src/db.js';
 import { createAiRouter } from '../src/routes/ai.js';
@@ -22,7 +23,8 @@ import { createPatientMappingService } from '../src/services/patientMappings.js'
 import { createRequestService } from '../src/services/requests.js';
 import { createStudyService } from '../src/services/studies.js';
 import { createPatientService } from '../src/services/patients.js';
-import { createRoleMiddleware } from '../src/middleware/auth.js';
+import { createUserService } from '../src/services/users.js';
+import { createAuthMiddleware, createRoleMiddleware } from '../src/middleware/auth.js';
 
 function createFixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'orthoviewplus-security-'));
@@ -283,6 +285,36 @@ async function requestWithUser(router, user, method, route, body) {
     const response = await fetch(`http://127.0.0.1:${server.address().port}${route}`, {
       method,
       headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const responseBody = response.headers.get('content-type')?.includes('application/json')
+      ? await response.json()
+      : await response.text();
+    return { status: response.status, body: responseBody };
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+async function requestWithAiAuthorization(router, fixture, user, method, route, body) {
+  const app = express();
+  const jwtSecret = 'test-ai-authorization-secret';
+  const users = createUserService(fixture.db);
+  app.use(express.json());
+  app.use(createAuthMiddleware(jwtSecret, { getAuthState: users.getAuthState }));
+  app.use(createRoleMiddleware('radiologist'));
+  app.use(router);
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const headers = {};
+    if (user) {
+      headers.Authorization = `Bearer ${jwt.sign({}, jwtSecret, { subject: String(user.id) })}`;
+    }
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${route}`, {
+      method,
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const responseBody = response.headers.get('content-type')?.includes('application/json')
@@ -826,6 +858,24 @@ test('AI creation checks exact study assignment and derives patient identity fro
   const fixture = createFixture();
   try {
     const orthanc = createMockOrthanc();
+    const getInstance = orthanc.getInstance.bind(orthanc);
+    orthanc.getInstance = async (id) => {
+      const instance = await getInstance(id);
+      if (id === 'instance-a') {
+        delete instance.ParentStudy;
+        instance.ParentSeries = 'series-a';
+      }
+      return instance;
+    };
+    orthanc.getInstanceStudy = async (id) => {
+      const instance = await orthanc.getInstance(id);
+      const series = instance.ParentSeries ? await orthanc.getSeries(instance.ParentSeries) : null;
+      const tags = await orthanc.getInstanceTags(id);
+      return {
+        orthancStudyId: instance.ParentStudy || series?.ParentStudy,
+        patientId: id === 'prior-missing-patient' ? null : tags.PatientID,
+      };
+    };
     const priorRequestId = fixture.db.prepare(
       `INSERT INTO imaging_requests (patient_id, requested_by, assigned_radiologist_id, examination, modality)
        VALUES (?, ?, ?, 'CT prior', 'CT')`,
@@ -867,6 +917,15 @@ test('AI creation checks exact study assignment and derives patient identity fro
     assert.equal(validPrior.status, 201);
     assert.equal(enqueued.patientId, fixture.patientId);
     assert.equal(enqueued.input.priorInstanceId, 'prior-allowed');
+
+    const missingPriorPatientId = await requestWithUser(router, radiologist, 'POST', '/jobs', {
+      capability: 'compare',
+      sourceStudyId: fixture.assignedStudyId,
+      instanceId: 'instance-a',
+      priorInstanceId: 'prior-missing-patient',
+    });
+    assert.equal(missingPriorPatientId.status, 409);
+    assert.match(missingPriorPatientId.body.error, /prior DICOM instance does not contain a PatientID/);
 
     const unassigned = await requestWithUser(router, radiologist, 'POST', '/jobs', {
       capability: 'restore',
@@ -919,12 +978,15 @@ test('AI job and result routes do not substitute requester ownership for exact s
       resultsDirectory: fixture.directory,
     });
     const user = { id: fixture.radiologistId, role: 'radiologist' };
-    assert.deepEqual((await requestWithUser(router, user, 'GET', '/jobs')).body.jobs, []);
-    assert.equal((await requestWithUser(router, user, 'GET', '/jobs/8')).status, 403);
-    assert.equal((await requestWithUser(router, user, 'GET', '/results/9/file')).status, 403);
-    assert.equal((await requestWithUser(router, user, 'GET', '/results/9/overlay')).status, 403);
-    assert.equal((await requestWithUser(router, user, 'POST', '/results/9/review', {})).status, 403);
-    assert.equal((await requestWithUser(router, user, 'POST', '/jobs/8/retry', {})).status, 403);
+    assert.equal((await requestWithAiAuthorization(router, fixture, null, 'GET', '/capabilities')).status, 401);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'GET', '/capabilities')).status, 200);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'GET', '/jobs')).status, 200);
+    assert.deepEqual((await requestWithAiAuthorization(router, fixture, user, 'GET', '/jobs')).body.jobs, []);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'GET', '/jobs/8')).status, 403);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'GET', '/results/9/file')).status, 403);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'GET', '/results/9/overlay')).status, 403);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'POST', '/results/9/review', {})).status, 403);
+    assert.equal((await requestWithAiAuthorization(router, fixture, user, 'POST', '/jobs/8/retry', {})).status, 403);
 
     const administrator = { id: fixture.adminId, role: 'administrator' };
     for (const [method, route, body] of [
@@ -938,7 +1000,7 @@ test('AI job and result routes do not substitute requester ownership for exact s
       ['POST', '/results/9/review', {}],
       ['POST', '/jobs/8/retry', {}],
     ]) {
-      assert.equal((await requestWithUser(router, administrator, method, route, body)).status, 403);
+      assert.equal((await requestWithAiAuthorization(router, fixture, administrator, method, route, body)).status, 403);
     }
   } finally {
     closeFixture(fixture);
