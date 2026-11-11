@@ -1,7 +1,10 @@
+﻿
+import { useState, useEffect, useCallback } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { formatRole, getInitials } from '../utils/format.js';
 import Sidebar from './Sidebar.jsx';
+import useTheme from '../hooks/useTheme.js';
 
 const pageMeta = {
   '/dashboard': {
@@ -56,7 +59,12 @@ const pageMeta = {
     title: 'Administrator Profile',
     description: 'Your account information.',
   },
-  // Radiologist workspace pages - no description
+  '/admin/settings': {
+    title: 'My Profile & Settings',
+    description: 'Manage your administrator profile, password and preferences.',
+  },
+
+  // Radiologist workspace pages.
   '/scans': { title: 'Scans & Imaging', description: '' },
   '/ai-tools': { title: 'AI Imaging Tools', description: '' },
   '/ai-tools/restore': { title: 'Image Restoration', description: '' },
@@ -74,52 +82,156 @@ const pageMeta = {
 };
 
 function sectionFor(pathname) {
-  if (['/admin/dashboard', '/admin/schedule', '/admin/alerts', '/admin/modalities'].includes(pathname)) return 'Department';
-  if (['/admin/users', '/admin/audit-logs', '/admin/system'].includes(pathname)) return 'Administration';
-  if (pathname === '/admin/profile') return 'Account';
+  if (
+    [
+      '/admin/dashboard',
+      '/admin/schedule',
+      '/admin/alerts',
+      '/admin/modalities',
+    ].includes(pathname)
+  ) {
+    return 'Department';
+  }
+
+  if (
+    [
+      '/admin/users',
+      '/admin/audit-logs',
+      '/admin/system',
+    ].includes(pathname)
+  ) {
+    return 'Administration';
+  }
+
+  if (pathname === '/admin/profile' || pathname === '/admin/settings') {
+    return 'Account';
+  }
+
   return 'Clinical Workspace';
 }
 
 const todayLabel = () =>
-  new Date().toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+  new Date().toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
 
 export default function Layout() {
   const { pathname } = useLocation();
   const { user } = useAuth();
-  const meta = pageMeta[pathname] ?? { title: 'OrthoView+', description: '' };
+
+  // Initialize and expose the shared theme state.
+  const { theme, setTheme } = useTheme();
+
+  const meta = pageMeta[pathname] ?? {
+    title: 'OrthoView+',
+    description: '',
+  };
+
   const UserArea = user?.role === 'administrator' ? Link : 'div';
-  // The Admin Profile page intentionally keeps its original light presentation.
-  const legacyLight = pathname === '/admin/profile';
+
 
   return (
     <div className="app-shell">
       <Sidebar />
+
       <div className="workspace">
         <header className="topbar">
           <div className="topbar-title">
-            <span className="topbar-crumb">{sectionFor(pathname)}</span>
+            <span className="topbar-crumb">
+              {sectionFor(pathname)}
+            </span>
+
             <h2>{meta.title}</h2>
-            {meta.description && user?.role !== 'radiologist' ? <p>{meta.description}</p> : null}
+
+            {meta.description && user?.role !== 'radiologist' ? (
+              <p>{meta.description}</p>
+            ) : null}
           </div>
+
           <div className="topbar-meta">
-            <span className="topbar-date">{todayLabel()}</span>
+            <span className="topbar-date">
+              {todayLabel()}
+            </span>
+
             {user ? (
-              <UserArea {...(user.role === 'administrator' ? { to: '/admin/profile', title: 'View administrator profile' } : {})} className="topbar-user">
+              <UserArea
+                {...(
+                  user.role === 'administrator'
+                    ? {
+                        to: '/admin/settings',
+                        title: 'View administrator profile',
+                      }
+                    : {}
+                )}
+                className="topbar-user"
+              >
                 <div className="topbar-user-text">
                   <strong>{user.username}</strong>
                   <span>{formatRole(user.role)}</span>
                 </div>
-                <span className="avatar avatar-light" aria-hidden="true">
+
+                <span
+                  className="avatar avatar-light"
+                  aria-hidden="true"
+                >
                   {getInitials(user.username)}
                 </span>
               </UserArea>
             ) : null}
+
+            {/* Theme toggle for administrator workspace. */}
+            {user?.role === 'administrator' && (
+              <button
+                type="button"
+                className="topbar-theme-toggle"
+                title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+                aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+                aria-pressed={theme === 'dark'}
+                onClick={() =>
+                  setTheme(theme === 'light' ? 'dark' : 'light')
+                }
+              >
+                <svg
+                  width={20}
+                  height={20}
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  stroke="currentColor"
+                  className="theme-sun"
+                  aria-hidden="true"
+                >
+                  <circle cx="12" cy="12" r="5" />
+                  <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                </svg>
+
+                <svg
+                  width={20}
+                  height={20}
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  className="theme-moon"
+                  aria-hidden="true"
+                  style={{
+                    display: theme === 'dark' ? 'none' : 'block',
+                  }}
+                >
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+              </button>
+            )}
           </div>
         </header>
-        <main className={legacyLight ? 'main legacy-light' : 'main'}>
+
+        <main className="main">
           <Outlet />
         </main>
       </div>
     </div>
   );
 }
+

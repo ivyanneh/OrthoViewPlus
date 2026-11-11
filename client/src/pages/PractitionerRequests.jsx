@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
-import { StatusBadge, Table } from '../components/StatusBadge.jsx';
-import { Modal, Button } from '../components/Modal.jsx';
+import StatusBadge from '../components/StatusBadge.jsx';
+
 
 export default function PractitionerRequests() {
   const { user } = useAuth();
@@ -44,12 +44,12 @@ export default function PractitionerRequests() {
         <h1>Imaging Schedule & Requests</h1>
         <div className="filter-bar">
           {statusOptions.map(opt => (
-            <Button key={opt} type="button" className={filter === opt ? 'primary-button' : 'secondary-button'}
+            <button key={opt} type="button" className={filter === opt ? 'primary-button' : 'secondary-button'}
               style={{marginRight: '0.5rem', padding: '0.5rem 1rem'}}
               onClick={() => setFilter(opt)}
             >
               {opt}
-            </Button>
+            </button>
           ))}
         </div>
       </div>
@@ -57,7 +57,7 @@ export default function PractitionerRequests() {
       {error ? <p className="error">Error: {error}</p> : null}
 
       <div className="worklist-table">
-        <Table>
+        <table>
           <thead>
             <tr>
               <th>Request ID</th>
@@ -88,12 +88,12 @@ export default function PractitionerRequests() {
               </tr>
             )}
           </tbody>
-        </Table>
+        </table>
       </div>
 
-      <Button onClick={() => alert('Open New Imaging Request Modal')} className="primary-button" style={{marginTop: '1rem'}}>
+      <button onClick={() => alert('Open New Imaging Request Modal')} className="primary-button" style={{marginTop: '1rem'}}>
         + Schedule New Imaging
-      </Button>
+      </button>
     </section>
   );
 }

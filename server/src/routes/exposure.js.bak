@@ -1,0 +1,238 @@
+import { Router } from 'express';
+import { AppError, handleRoute } from '../utils/http.js';
+import express from 'express';
+export function createExposureRouter({ orthanc, audit, studies, patientMappings }) {
+  const router = Router();
+
+  router.get('/', handleRoute(async (req, res) => {
+    if (!['practitioner', 'radiologist'].includes(req.user?.role)) {
+      throw new AppError('Exposure information is available only to practitioners and radiologists.', 403);
+    }
+
+    audit.log({
+      userId: req.user?.id ?? null,
+      action: 'view_exposure_index',
+      target: 'exposure_index',
+      description: `User "${req.user?.username ?? 'unknown'}" loaded the exposure index module.`,
+    });
+
+    const orthancStatus = await orthanc.getOrthancStatus();
+    if (!orthancStatus.connected) {
+      return res.status(503).json({ orthanc: orthancStatus, rows: [], error: 'Orthanc unavailable' });
+    }
+
+    const rows = await orthanc.getExposureIndexRows({ limit: req.query.limit });
+    const visibleRows = rows.filter((row) => {
+      if (!row.orthancStudyId || !row.patientId) return false;
+      const internalStudy = studies.getByOrthancStudyId(row.orthancStudyId);
+      const mapping = patientMappings.getVerifiedMapping(row.patientId);
+      if (!internalStudy || !mapping || Number(mapping.patientId) !== Number(internalStudy.patientId)) return false;
+      return req.user.role === 'radiologist'
+        ? studies.isAssignedToRadiologist(row.orthancStudyId, req.user.id)
+        : studies.isAssignedToPractitioner(row.orthancStudyId, req.user.id);
+    }).map(({ orthancStudyId: _orthancStudyId, ...row }) => row);
+
+    res.json({ orthanc: orthancStatus, rows: visibleRows });
+  }));
+
+  router.post(
+    '/synthetic-dicom',
+    // Use raw-body parser for DICOM bytes - do not rely on express.json() for binary data
+    express.raw({ type: 'application/dicom', limit: '50mb' }),
+    handleRoute(async (req, res) => {
+      if (req.user?.role !== 'administrator') {
+        throw new AppError('Synthetic DICOM ingestion is restricted to administrators.', 403)
+      }
+
+      // DICOM bytes are available as req.body (Buffer) from express.raw()
+      const dicomData = req.body
+
+      if (!dicomData || dicomData.length === 0) {
+        throw new AppError('DICOM data is required.', 400)
+      }
+
+      // Validate size limit (default 50MB)
+      const maxSize = Number(process.env.ORTHANC_UPLOAD_MAX_SIZE) || 50 * 1024 * 1024
+      if (dicomData.length > maxSize) {
+        throw new AppError(`DICOM data exceeds size limit of ${maxSize / (1024 * 1024)}MB`, 400)
+      }
+
+      // Require explicit existing patientId and requestId metadata alongside the binary upload
+      const patientIdFromQuery = req.query.patientId
+      const requestIdFromQuery = req.query.requestId
+
+      if (!patientIdFromQuery) {
+        throw new AppError('patientId metadata is required alongside the DICOM binary upload.', 400)
+      }
+      if (!requestIdFromQuery) {
+        throw new AppError('requestId metadata is required alongside the DICOM binary upload.', 400)
+      }
+
+      // Validate that the patient exists and is active
+      const patientRow = studies.getPatient(Number(patientIdFromQuery));
+      if (!patientRow) {
+        throw new AppError('Patient not found.', 404);
+      }
+      if (patientRow.status !== 'active') {
+        throw new AppError('Patient is not active.', 400)
+      }
+
+      // Read and validate actual DICOM metadata before linking
+      const patientRow = studies.getPatient(Number(patientIdFromQuery));
+      if (!patientRow) {
+        throw new AppError('Patient not found.', 404);
+      }
+      if (patientRow.status !== 'active') {
+        throw new AppError('Patient is not active.', 400);
+      }
+
+      // Read and validate actual DICOM metadata before linking
+      let dicomMeta;
+      try {
+        dicomMeta = await orthanc.getInstanceTags
+          ? await orthanc.getInstanceTags(uploadResult.orthancStudyId)
+          : null;
+      } catch {
+        throw new AppError('Failed to read DICOM metadata.', 400);
+      }
+
+      // Validate the actual DICOM PatientID corresponds to the intended patient's approved MRN
+      const dicomPatientID = dicomMeta && dicomMeta.PatientID
+        ? dicomMeta.PatientID
+        : null;
+      if (dicomPatientID !== patientRow.mrn) {
+        throw new AppError(
+          `DICOM PatientID "${dicomPatientID}" does not match patient's approved MRN "${patientRow.mrn}".`,
+          400
+        );
+      }
+
+      // Require explicit existing patientId and requestId metadata alongside the binary upload
+      const patientIdFromQuery = req.query.patientId
+      const requestIdFromQuery = req.query.requestId
+
+      if (!patientIdFromQuery) {
+        throw new AppError('patientId metadata is required alongside the DICOM binary upload.', 400)
+      }
+      if (!requestIdFromQuery) {
+        throw new AppError('requestId metadata is required alongside the DICOM binary upload.', 400)
+      }
+
+      // Upload to Orthanc - the Orthanc server validates DICOM structure
+      let uploadResult
+      try {
+        uploadResult = await orthanc.uploadInstances(dicomData, {
+          userId: req.user.id,
+          description: 'Synthetic demonstration data import',
+        })
+      } catch (uploadError) {
+        throw new AppError('Orthanc upload failed: ' + (uploadError.message || String(uploadError)), 502)
+      }
+
+      // Link study to patient using validated workflow
+      // Require valid existing patient and imaging request
+      const internalStudy = studies.getByOrthancStudyId(uploadResult.orthancStudyId)
+      if (!internalStudy) {
+        throw new AppError('Failed to retrieve study from Orthanc after upload.', 500)
+      }
+
+      // Use the existing linkOrthancStudy validation - this checks that the imaging request
+      // belongs to the supplied patient, checks modality compatibility, and prevents the same
+      // Orthanc study from being linked to a different patient or request
+      let studyId
+      try {
+        studyId = studies.linkOrthancStudy({
+          requestId: Number(requestIdFromQuery),
+          modality: internalStudy.modality || uploadResult.modality || 'MR',
+          studyInstanceUID: internalStudy.study_instance_uid || uploadResult.studyInstanceUID,
+          orthancStudyId: uploadResult.orthancStudyId,
+          patientId: Number(patientIdFromQuery),
+        })
+      } catch (linkError) {
+        // If linking fails, attempt safe cleanup of the newly uploaded Orthanc study
+        try {
+          await orthanc.deleteInstances(uploadResult.orthancStudyId)
+        } catch (cleanupError) {
+          // Log the orphaned study identifier for recovery
+          console.error('Orthanc rollback failed - orphaned study:', uploadResult.orthancStudyId, cleanupError.message || String(cleanupError))
+        }
+        throw new AppError('Failed to link study to patient: ' + (linkError.message || String(linkError)), 409)
+      }
+
+      // Record audit log
+      await audit.log({
+        userId: req.user.id,
+        action: 'import_synthetic_dicom',
+        target: 'synthetic_dicom',
+        description: `Administrator imported synthetic DICOM study ${uploadResult.orthancStudyId} for patient ${uploadResult.patientId}`,
+        metadata: {
+          studyInstanceUID: uploadResult.studyInstanceUID,
+          modality: uploadResult.modality,
+          orthancStudyId: uploadResult.orthancStudyId,
+        },
+      })
+
+      res.json({
+        success: true,
+        studyId,
+        orthancStudyId: uploadResult.orthancStudyId,
+        studyInstanceUID: uploadResult.studyInstanceUID,
+        patientId: uploadResult.patientId,
+        message: 'Synthetic DICOM uploaded and linked successfully',
+      })
+    }
+
+      // Link study to patient using validated workflow
+      // Require valid existing patient and imaging request
+      if (!uploadResult.patientId) {
+        throw new AppError('Upload did not return a patient ID.', 400);
+      }
+
+      const internalStudy = studies.getByOrthancStudyId(uploadResult.orthancStudyId);
+      if (!internalStudy) {
+        throw new AppError('Failed to retrieve study from Orthanc after upload.', 500);
+      }
+
+      // Use the existing linkOrthancStudy validation - this checks that the imaging request
+      // belongs to the supplied patient, checks modality compatibility, and prevents the same
+      // Orthanc study from being linked to a different patient or request
+      let studyId;
+      try {
+        studyId = studies.linkOrthancStudy({
+          requestId: internalStudy.request_id || uploadResult.requestId || undefined,
+          modality: internalStudy.modality || uploadResult.modality || 'MR',
+          studyInstanceUID: internalStudy.study_instance_uid || uploadResult.studyInstanceUID,
+          orthancStudyId: uploadResult.orthancStudyId,
+          patientId: uploadResult.patientId,
+        });
+      } catch (linkError) {
+        // If linking fails, we should attempt to clean up the Orthanc upload
+        // Note: Orthanc does not have a built-in delete instances API in all versions,
+        // so we log the error and do not re-throw to avoid leaving inconsistent state
+        throw new AppError('Failed to link study to patient: ' + (linkError.message || String(linkError)), 400);
+      }
+
+      // Record audit log
+      await audit.log({
+        userId: req.user.id,
+        action: 'import_synthetic_dicom',
+        target: 'synthetic_dicom',
+        description: `Administrator imported synthetic DICOM study ${uploadResult.orthancStudyId} for patient ${uploadResult.patientId}`,
+        metadata: {
+          studyInstanceUID: uploadResult.studyInstanceUID,
+          modality: uploadResult.modality,
+          orthancStudyId: uploadResult.orthancStudyId,
+        },
+      });
+
+      res.json({
+        success: true,
+        studyId,
+        orthancStudyId: uploadResult.orthancStudyId,
+        studyInstanceUID: uploadResult.studyInstanceUID,
+        patientId: uploadResult.patientId,
+        message: 'Synthetic DICOM uploaded and linked successfully',
+      });
+    });
+return router
+}

@@ -1,8 +1,15 @@
+
 import axios from 'axios';
 import { AppError } from '../utils/http.js';
 
-export function createOrthancService({ url, username, password, timeoutMs = 2500 }) {
+export function createOrthancService({
+  url,
+  username,
+  password,
+  timeoutMs = 2500,
+}) {
   const baseURL = String(url || '').replace(/\/$/, '');
+
   const client = axios.create({
     baseURL,
     timeout: timeoutMs,
@@ -15,11 +22,13 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
   }
 
   function readTag(source, tagName) {
-    return source?.RequestedTags?.[tagName]
-      ?? source?.PatientMainDicomTags?.[tagName]
-      ?? source?.MainDicomTags?.[tagName]
-      ?? source?.[tagName]
-      ?? null;
+    return (
+      source?.RequestedTags?.[tagName] ??
+      source?.PatientMainDicomTags?.[tagName] ??
+      source?.MainDicomTags?.[tagName] ??
+      source?.[tagName] ??
+      null
+    );
   }
 
   function normalizeValue(value) {
@@ -45,8 +54,21 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
   }
 
   async function request(method, path, data) {
-    const response = await client.request({ method, url: path, data });
+    const response = await client.request({
+      method,
+      url: path,
+      data,
+    });
+
     return response.data;
+  }
+
+  async function findResources(level, options = {}) {
+    return request('POST', '/tools/find', {
+      Level: level,
+      Expand: true,
+      ...options,
+    });
   }
 
   async function getSystem() {
@@ -61,12 +83,41 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
     return request('GET', `/changes?limit=${limit}`);
   }
 
-  async function findResources(level, options = {}) {
-    return request('POST', '/tools/find', {
-      Level: level,
-      Expand: true,
-      ...options,
+  async function findPatientByDicomPatientId(patientId) {
+    const requestedPatientId = String(patientId ?? '').trim();
+
+    if (!requestedPatientId) {
+      throw new AppError('A DICOM PatientID is required.', 400);
+    }
+
+    const patients = await findResources('Patient', {
+      Query: {
+        PatientID: requestedPatientId,
+      },
+      Limit: 2,
+      RequestedTags: ['PatientID'],
     });
+
+    const matches = (Array.isArray(patients) ? patients : []).filter(
+      (patient) =>
+        String(readTag(patient, 'PatientID') ?? '').trim() === requestedPatientId,
+    );
+
+    if (matches.length > 1) {
+      throw new AppError(
+        'Multiple Orthanc patients have this DICOM PatientID.',
+        409,
+      );
+    }
+
+    if (matches.length === 0) {
+      return null;
+    }
+
+    return {
+      ID: matches[0].ID,
+      PatientID: String(readTag(matches[0], 'PatientID')).trim(),
+    };
   }
 
   async function getStudy(studyId) {
@@ -88,12 +139,28 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
 
     if (instance?.ParentSeries) {
       series = await getSeries(instance.ParentSeries);
-      if (Array.isArray(series?.Instances) && !series.Instances.includes(instanceId)) {
-        throw new AppError('Orthanc series does not contain the requested instance.', 409);
+
+      if (
+        Array.isArray(series?.Instances) &&
+        !series.Instances.includes(instanceId)
+      ) {
+        throw new AppError(
+          'Orthanc series does not contain the requested instance.',
+          409,
+        );
       }
-      if (studyId && series?.ParentStudy && String(studyId) !== String(series.ParentStudy)) {
-        throw new AppError('Orthanc instance and series reference different studies.', 409);
+
+      if (
+        studyId &&
+        series?.ParentStudy &&
+        String(studyId) !== String(series.ParentStudy)
+      ) {
+        throw new AppError(
+          'Orthanc instance and series reference different studies.',
+          409,
+        );
       }
+
       studyId ||= series?.ParentStudy ?? null;
     }
 
@@ -103,6 +170,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
 
     const tags = await getInstanceTags(instanceId);
     const patientId = tags?.PatientID ?? tags?.patientId ?? null;
+
     return {
       instance,
       series,
@@ -122,6 +190,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
       url: `/instances/${instanceId}/preview`,
       responseType: 'arraybuffer',
     });
+
     return {
       buffer: Buffer.from(response.data),
       contentType: response.headers['content-type'] || 'image/jpeg',
@@ -135,6 +204,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
       params,
       responseType: 'arraybuffer',
     });
+
     return {
       buffer: Buffer.from(response.data),
       contentType: response.headers['content-type'] || 'image/png',
@@ -148,6 +218,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
       responseType: 'arraybuffer',
       timeout: timeoutMs > 2500 ? timeoutMs : 30000,
     });
+
     return Buffer.from(response.data);
   }
 
@@ -158,7 +229,11 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
   async function listSeriesForStudy(studyId) {
     const study = await getStudy(studyId);
     const seriesIds = Array.isArray(study.Series) ? study.Series : [];
-    const series = await Promise.all(seriesIds.map((id) => getSeries(id).catch(() => null)));
+
+    const series = await Promise.all(
+      seriesIds.map((id) => getSeries(id).catch(() => null)),
+    );
+
     return series.filter(Boolean).map((item) => ({
       id: item.ID,
       modality: item.MainDicomTags?.Modality ?? null,
@@ -219,6 +294,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
       studyInstanceUID: normalizeValue(readTag(study, 'StudyInstanceUID')),
       modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
       seriesCount: Array.isArray(study?.Series) ? study.Series.length : null,
+
       primarySeries: {
         id: series?.ID ?? null,
         seriesDate: normalizeValue(seriesTags.SeriesDate),
@@ -227,17 +303,23 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
         modality: normalizeValue(seriesTags.Modality),
         protocolName: normalizeValue(seriesTags.ProtocolName),
       },
+
       primaryInstance: {
         id: instance?.ID ?? null,
         instanceNumber: normalizeValue(tags.InstanceNumber),
         sliceThickness: normalizeValue(tags.SliceThickness),
         kvp: normalizeValue(tags.KVP),
-        tubeCurrent: normalizeValue(tags.XRayTubeCurrent ?? tags.TubeCurrent),
-        reconstructionAlgorithm: normalizeValue(tags.ReconstructionAlgorithm),
+        tubeCurrent: normalizeValue(
+          tags.XRayTubeCurrent ?? tags.TubeCurrent,
+        ),
+        reconstructionAlgorithm: normalizeValue(
+          tags.ReconstructionAlgorithm,
+        ),
         exposureIndex: normalizeValue(tags.ExposureIndex),
         targetExposureIndex: normalizeValue(tags.TargetExposureIndex),
         deviationIndex: normalizeValue(tags.DeviationIndex),
       },
+
       raw: {
         study: studyTags,
         series: seriesTags,
@@ -249,6 +331,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
   async function getHealth() {
     try {
       const system = await getSystem();
+
       return {
         connected: true,
         status: 'Orthanc: Connected',
@@ -268,6 +351,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
   async function getDashboardSummary() {
     try {
       const health = await getHealth();
+
       if (!health.connected) {
         return {
           ...health,
@@ -279,13 +363,19 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
         };
       }
 
-      const [statistics, changes] = await Promise.all([getStatistics(), getChanges(6)]);
+      const [statistics, changes] = await Promise.all([
+        getStatistics(),
+        getChanges(6),
+      ]);
+
       return {
         ...health,
         studies: statistics.CountStudies ?? statistics.Studies ?? null,
         series: statistics.CountSeries ?? statistics.Series ?? null,
         instances: statistics.CountInstances ?? statistics.Instances ?? null,
-        recentActivity: Array.isArray(changes?.Changes) ? changes.Changes.slice(0, 6).map(formatActivity) : [],
+        recentActivity: Array.isArray(changes?.Changes)
+          ? changes.Changes.slice(0, 6).map(formatActivity)
+          : [],
         message: null,
       };
     } catch {
@@ -315,7 +405,15 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
             Direction: 'DESC',
           },
         ],
-        RequestedTags: ['PatientID', 'PatientName', 'StudyID', 'StudyDate', 'StudyDescription', 'StudyInstanceUID', 'ModalitiesInStudy'],
+        RequestedTags: [
+          'PatientID',
+          'PatientName',
+          'StudyID',
+          'StudyDate',
+          'StudyDescription',
+          'StudyInstanceUID',
+          'ModalitiesInStudy',
+        ],
       });
 
       return rows.map((study) => ({
@@ -326,19 +424,32 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
         studyDate: normalizeValue(readTag(study, 'StudyDate')),
         studyDescription: normalizeValue(readTag(study, 'StudyDescription')),
         studyInstanceUID: normalizeValue(readTag(study, 'StudyInstanceUID')),
-        modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
+        modalitiesInStudy: normalizeValue(
+          readTag(study, 'ModalitiesInStudy'),
+        ),
         seriesCount: Array.isArray(study.Series) ? study.Series.length : null,
       }));
     } catch {
       try {
         const ids = await request('GET', '/studies');
-        const limitedIds = Array.isArray(ids) ? ids.slice(0, Math.min(Math.max(Number(limit) || 50, 1), 200)) : [];
-        const studies = await Promise.all(limitedIds.map((studyId) => getStudy(studyId).catch(() => null)));
+
+        const limitedIds = Array.isArray(ids)
+          ? ids.slice(0, Math.min(Math.max(Number(limit) || 50, 1), 200))
+          : [];
+
+        const studies = await Promise.all(
+          limitedIds.map((studyId) => getStudy(studyId).catch(() => null)),
+        );
 
         const missingStudy = studies.some((study) => !study);
+
         if (missingStudy) {
-          throw new AppError('Orthanc returned study identifiers that could not be resolved.', 503);
+          throw new AppError(
+            'Orthanc returned study identifiers that could not be resolved.',
+            503,
+          );
         }
+
         return studies.map((study) => ({
           id: study.ID,
           patientId: normalizeValue(readTag(study, 'PatientID')),
@@ -347,12 +458,18 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
           studyDate: normalizeValue(readTag(study, 'StudyDate')),
           studyDescription: normalizeValue(readTag(study, 'StudyDescription')),
           studyInstanceUID: normalizeValue(readTag(study, 'StudyInstanceUID')),
-          modalitiesInStudy: normalizeValue(readTag(study, 'ModalitiesInStudy')),
+          modalitiesInStudy: normalizeValue(
+            readTag(study, 'ModalitiesInStudy'),
+          ),
           seriesCount: Array.isArray(study.Series) ? study.Series.length : null,
         }));
       } catch (error) {
         if (error instanceof AppError) throw error;
-        throw new AppError('Unable to retrieve imaging studies from Orthanc.', 503);
+
+        throw new AppError(
+          'Unable to retrieve imaging studies from Orthanc.',
+          503,
+        );
       }
     }
   }
@@ -362,34 +479,52 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
       const instances = await getInstanceSearchRows(limit);
       const seriesStudies = new Map();
 
-      return await Promise.all(instances.map(async (instance) => {
-        const seriesId = instance.ParentSeries ?? null;
-        if (seriesId && !seriesStudies.has(seriesId)) {
-          const series = await getSeries(seriesId);
-          seriesStudies.set(seriesId, series.ParentStudy ?? null);
-        }
-        return {
-          id: instance.ID,
-          orthancStudyId: seriesId ? seriesStudies.get(seriesId) : null,
-          studyId: normalizeValue(readTag(instance, 'StudyID')),
-          studyDate: normalizeValue(readTag(instance, 'StudyDate')),
-          studyDescription: normalizeValue(readTag(instance, 'StudyDescription')),
-          studyInstanceUID: normalizeValue(readTag(instance, 'StudyInstanceUID')),
-          patientId: normalizeValue(readTag(instance, 'PatientID')),
-          patientName: normalizeValue(readTag(instance, 'PatientName')),
-          modality: normalizeValue(readTag(instance, 'Modality')),
-          seriesId,
-          seriesDescription: normalizeValue(readTag(instance, 'SeriesDescription')),
-          seriesNumber: normalizeValue(readTag(instance, 'SeriesNumber')),
-          instanceNumber: normalizeValue(readTag(instance, 'InstanceNumber')),
-          exposureIndex: normalizeValue(readTag(instance, 'ExposureIndex')),
-          targetExposureIndex: normalizeValue(readTag(instance, 'TargetExposureIndex')),
-          deviationIndex: normalizeValue(readTag(instance, 'DeviationIndex')),
-        };
-      }));
+      return await Promise.all(
+        instances.map(async (instance) => {
+          const seriesId = instance.ParentSeries ?? null;
+
+          if (seriesId && !seriesStudies.has(seriesId)) {
+            const series = await getSeries(seriesId);
+            seriesStudies.set(seriesId, series.ParentStudy ?? null);
+          }
+
+          return {
+            id: instance.ID,
+            orthancStudyId: seriesId
+              ? seriesStudies.get(seriesId)
+              : null,
+            studyId: normalizeValue(readTag(instance, 'StudyID')),
+            studyDate: normalizeValue(readTag(instance, 'StudyDate')),
+            studyDescription: normalizeValue(
+              readTag(instance, 'StudyDescription'),
+            ),
+            studyInstanceUID: normalizeValue(
+              readTag(instance, 'StudyInstanceUID'),
+            ),
+            patientId: normalizeValue(readTag(instance, 'PatientID')),
+            patientName: normalizeValue(readTag(instance, 'PatientName')),
+            modality: normalizeValue(readTag(instance, 'Modality')),
+            seriesId,
+            seriesDescription: normalizeValue(
+              readTag(instance, 'SeriesDescription'),
+            ),
+            seriesNumber: normalizeValue(readTag(instance, 'SeriesNumber')),
+            instanceNumber: normalizeValue(readTag(instance, 'InstanceNumber')),
+            exposureIndex: normalizeValue(readTag(instance, 'ExposureIndex')),
+            targetExposureIndex: normalizeValue(
+              readTag(instance, 'TargetExposureIndex'),
+            ),
+            deviationIndex: normalizeValue(readTag(instance, 'DeviationIndex')),
+          };
+        }),
+      );
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError('Unable to retrieve exposure metadata from Orthanc.', 503);
+
+      throw new AppError(
+        'Unable to retrieve exposure metadata from Orthanc.',
+        503,
+      );
     }
   }
 
@@ -404,7 +539,11 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
 
     if (primarySeriesId) {
       series = await getSeries(primarySeriesId);
-      const instanceIds = Array.isArray(series?.Instances) ? series.Instances : [];
+
+      const instanceIds = Array.isArray(series?.Instances)
+        ? series.Instances
+        : [];
+
       const primaryInstanceId = instanceIds[0] ?? null;
 
       if (primaryInstanceId) {
@@ -417,21 +556,39 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
   }
 
   async function compareStudies(leftStudyId, rightStudyId) {
-    const [left, right] = await Promise.all([getStudyProfile(leftStudyId), getStudyProfile(rightStudyId)]);
+    const [left, right] = await Promise.all([
+      getStudyProfile(leftStudyId),
+      getStudyProfile(rightStudyId),
+    ]);
+
     return { left, right };
   }
 
   async function getOrthancStatus() {
     const health = await getHealth();
+
     return health.connected
-      ? { connected: true, status: health.status, name: health.name, version: health.version }
-      : { connected: false, status: 'Orthanc unavailable', name: null, version: null };
+      ? {
+          connected: true,
+          status: health.status,
+          name: health.name,
+          version: health.version,
+        }
+      : {
+          connected: false,
+          status: 'Orthanc unavailable',
+          name: null,
+          version: null,
+        };
   }
 
   async function getRecentActivity(limit = 6) {
     try {
       const changes = await getChanges(limit);
-      return Array.isArray(changes?.Changes) ? changes.Changes.slice(0, limit).map(formatActivity) : [];
+
+      return Array.isArray(changes?.Changes)
+        ? changes.Changes.slice(0, limit).map(formatActivity)
+        : [];
     } catch {
       return [];
     }
@@ -439,6 +596,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
 
   async function getConnectionSummary() {
     const health = await getHealth();
+
     if (!health.connected) {
       return {
         studies: null,
@@ -448,6 +606,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
     }
 
     const statistics = await getStatistics();
+
     return {
       studies: statistics.CountStudies ?? statistics.Studies ?? null,
       series: statistics.CountSeries ?? null,
@@ -461,6 +620,7 @@ export function createOrthancService({ url, username, password, timeoutMs = 2500
     getSystem,
     getStatistics,
     getChanges,
+    findPatientByDicomPatientId,
     getStudy,
     getSeries,
     getInstance,

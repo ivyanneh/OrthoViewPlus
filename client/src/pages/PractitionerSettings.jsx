@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
-import { Modal, Button } from '../components/Modal.jsx';
-import { StatusBadge, ErrorMessage } from '../components/StatusBadge.jsx';
+
+
 import { getApiError } from '../utils/format.js';
 
 export default function PractitionerSettings() {
@@ -88,7 +88,7 @@ export default function PractitionerSettings() {
         <div className="panel-header">
           <h3>Account Settings</h3>
         </div>
-        {error ? <ErrorMessage message={error} /> : null}
+        {error ? <p className="error">{error}</p> : null}
         {success ? <div className="notice-banner">{success}</div> : null}
         <div className="panel-body">
           <h4>Account Status</h4>
@@ -98,9 +98,9 @@ export default function PractitionerSettings() {
           </div>
 
           <h4 style={{marginTop: '1.5rem'}}>Password Management</h4>
-          <Button onClick={() => setShowPasswordForm(true)} className="secondary-button">
+          <button onClick={() => setShowPasswordForm(true)} className="secondary-button">
             Reset Password
-          </Button>
+          </button>
 
           {showPasswordForm && (
             <div style={{marginTop: '1rem'}}>
@@ -132,9 +132,9 @@ export default function PractitionerSettings() {
               <span>Receive system notifications</span>
             </div>
           </div>
-          <Button onClick={handleSavePreferences} style={{marginTop: '1rem'}}>
+          <button onClick={handleSavePreferences} style={{marginTop: '1rem'}}>
             {saving ? 'Saving...' : 'Save Preferences'}
-          </Button>
+          </button>
         </div>
       </div>
     </section>

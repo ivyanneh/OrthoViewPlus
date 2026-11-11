@@ -2,31 +2,26 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import Login from './pages/Login.jsx';
-import Dashboard from './pages/Dashboard.jsx';
-import ExposureIndex from './pages/ExposureIndex.jsx';
-import CompareScans from './pages/CompareScans.jsx';
-import AuditLog from './pages/AuditLog.jsx';
+
+// Admin Pages
 import AdminDashboard from './pages/admin/AdminDashboard.jsx';
 import UserManagement from './pages/admin/UserManagement.jsx';
+import AdminPatients from './pages/admin/AdminPatients.jsx';
 import ImagingSchedule from './pages/admin/ImagingSchedule.jsx';
 import Alerts from './pages/admin/Alerts.jsx';
 import ModalityMonitoring from './pages/admin/ModalityMonitoring.jsx';
 import SystemAdministration from './pages/admin/SystemAdministration.jsx';
 import AdminProfile from './pages/admin/AdminProfile.jsx';
 import ImagingStudyManagement from './pages/admin/ImagingStudyManagement.jsx';
-import PatientManagement from './pages/admin/PatientManagement.jsx';
-import NotificationsPage from './pages/NotificationsPage.jsx';
-import PractitionerWorkspace from './pages/PractitionerWorkspace.jsx';
-import AdminRoute from './components/AdminRoute.jsx';
-import PractitionerRoute from './components/PractitionerRoute.jsx';
-import ClinicalRoute from './components/ClinicalRoute.jsx';
-import RadiologistRoute from './components/RadiologistRoute.jsx';
+
+// Practitioner Pages
 import PractitionerDashboard from './pages/PractitionerDashboard.jsx';
 import PractitionerScans from './pages/PractitionerScans.jsx';
 import PractitionerRequests from './pages/PractitionerRequests.jsx';
 import PractitionerProfile from './pages/PractitionerProfile.jsx';
 import PractitionerSettings from './pages/PractitionerSettings.jsx';
-import RadiologistDashboard from './pages/RadiologistDashboard.jsx';
+
+// Radiologist Pages
 import RadiologistWorkspaceDashboard from './pages/RadiologistWorkspaceDashboard.jsx';
 import ScansImaging from './pages/ScansImaging.jsx';
 import ImagingRequests from './pages/ImagingRequests.jsx';
@@ -35,9 +30,20 @@ import RadiologistProfile from './pages/RadiologistProfile.jsx';
 import AccountSettings from './pages/AccountSettings.jsx';
 import AiWorkbench from './pages/AiWorkbench.jsx';
 import ScanComparisons from './pages/ScanComparisons.jsx';
+
+// Shared & Clinical Pages
+import ExposureIndex from './pages/ExposureIndex.jsx';
+import CompareScans from './pages/CompareScans.jsx';
+import AuditLog from './pages/AuditLog.jsx';
+import NotificationsPage from './pages/NotificationsPage.jsx';
+
+// Guards & Context
+import AdminRoute from './components/AdminRoute.jsx';
+import PractitionerRoute from './components/PractitionerRoute.jsx';
+import ClinicalRoute from './components/ClinicalRoute.jsx';
+import RadiologistRoute from './components/RadiologistRoute.jsx';
 import { useAuth } from './context/AuthContext.jsx';
 import { homePathFor } from './utils/format.js';
-import AdminSettings from './pages/admin/AdminSettings.jsx';
 
 function HomeRedirect() {
   const { isAuthenticated, ready, user } = useAuth();
@@ -59,6 +65,7 @@ const clinicalPages = [
   ['/exposure-index', <ExposureIndex />],
   ['/compare-scans', <CompareScans />],
 ];
+
 const radiologistPages = [
   ['/dashboard', <RadiologistWorkspaceDashboard />],
   ['/scans', <ScansImaging />],
@@ -80,15 +87,14 @@ const radiologistPages = [
 const adminPages = [
   ['/admin/dashboard', <AdminDashboard />],
   ['/admin/users', <UserManagement />],
-  ['/admin/schedule', <ImagingSchedule />],
-  ['/admin/alerts', <Alerts />],
+  ['/admin/patients-imaging', <AdminPatients />],
+  ['/admin/scheduling', <ImagingSchedule />],
   ['/admin/audit-logs', <AuditLog />],
+  ['/admin/alerts', <Alerts />],
   ['/admin/modalities', <ModalityMonitoring />],
   ['/admin/system', <SystemAdministration />],
   ['/admin/profile', <AdminProfile />],
   ['/admin/imaging-studies', <ImagingStudyManagement />],
-  ['/admin/patients', <PatientManagement />],
-  ['/admin/settings', <AdminSettings />],
 ];
 
 export default function App() {
@@ -96,6 +102,8 @@ export default function App() {
     <Routes>
       <Route path="/" element={<HomeRedirect />} />
       <Route path="/login" element={<Login />} />
+      
+      {/* PROTECTED WORKSPACE ROUTES */}
       <Route
         element={
           <ProtectedRoute>
@@ -104,20 +112,34 @@ export default function App() {
         }
       >
         <Route path="/notifications" element={<NotificationsPage />} />
+
+        {/* Health Practitioner Workspace */}
         {practitionerPages.map(([path, element]) => (
           <Route key={path} path={path} element={<PractitionerRoute>{element}</PractitionerRoute>} />
         ))}
+
+        {/* Shared Clinical Workspaces */}
         {clinicalPages.map(([path, element]) => (
           <Route key={path} path={path} element={<ClinicalRoute>{element}</ClinicalRoute>} />
         ))}
+
+        {/* Radiologist Workspace */}
         {radiologistPages.map(([path, element]) => (
           <Route key={path} path={path} element={<RadiologistRoute>{element}</RadiologistRoute>} />
         ))}
+
+        {/* Administrator Workspace */}
         {adminPages.map(([path, element]) => (
           <Route key={path} path={path} element={<AdminRoute>{element}</AdminRoute>} />
         ))}
+
+        {/* Legacy & Shortcut Redirects */}
         <Route path="/audit-log" element={<Navigate to="/admin/audit-logs" replace />} />
+        <Route path="/admin/patients" element={<Navigate to="/admin/patients-imaging" replace />} />
+        <Route path="/admin/schedule" element={<Navigate to="/admin/scheduling" replace />} />
       </Route>
+
+      {/* FALLBACK CATCH-ALL */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

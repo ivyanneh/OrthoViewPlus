@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
 import DicomViewer from '../components/DicomViewer.jsx';
 import EmptyState from '../components/EmptyState.jsx';
@@ -8,6 +9,8 @@ import Modal from '../components/Modal.jsx';
 import { getApiError } from '../utils/format.js';
 
 export default function ScansImaging() {
+  const { user } = useAuth();
+  const isRadiologist = user?.role === 'radiologist';
   const [searchQuery, setSearchQuery] = useState('');
   const [searchType, setSearchType] = useState('patientId');
   const [searchResults, setSearchResults] = useState([]);
@@ -18,6 +21,41 @@ export default function ScansImaging() {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [assignedRequests, setAssignedRequests] = useState([]);
+  const [selectedRequest, setSelectedRequest] = useState(null);
+
+  useEffect(() => {
+    if (!isRadiologist) return undefined;
+
+    let cancelled = false;
+
+    async function loadAssignedRequests() {
+      setLoading(true);
+      setError('');
+
+      try {
+        const response = await api.get('/clinical/requests', {
+          params: { mine: 'true' },
+        });
+
+        if (!cancelled) {
+          setAssignedRequests(response.data.requests || []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(getApiError(err, 'Unable to load your assigned imaging requests.'));
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadAssignedRequests();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isRadiologist]);
 
   async function handleSearch() {
     if (!searchQuery.trim()) return;
@@ -53,6 +91,42 @@ export default function ScansImaging() {
     }
   }
 
+  async function selectAssignedRequest(request) {
+    if (Number(request.assignedRadiologistId) !== Number(user?.id)) {
+      setError('This request is not assigned to your account.');
+      return;
+    }
+
+    setError('');
+    setLoading(true);
+    setSelectedStudy(null);
+    setStudyProfile(null);
+    setPatientHistory(null);
+    setSelectedRequest(request);
+
+    try {
+      const response = await api.get(
+        `/clinical/patients/${request.patientId}`,
+        { params: { requestId: request.id } },
+      );
+
+      setPatientHistory(response.data);
+      const historyPatient = response.data.patient;
+      setSelectedPatient({
+        ...historyPatient,
+        first_name: historyPatient.first_name ?? historyPatient.firstName,
+        last_name: historyPatient.last_name ?? historyPatient.lastName,
+        date_of_birth: historyPatient.date_of_birth ?? historyPatient.dateOfBirth,
+      });
+    } catch (err) {
+      setSelectedRequest(null);
+      setSelectedPatient(null);
+      setError(getApiError(err, 'Unable to open the assigned request.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function selectStudy(study) {
     setSelectedStudy(study);
     setError('');
@@ -69,12 +143,78 @@ export default function ScansImaging() {
   }
 
   function handleNewSearch() {
+    setSelectedRequest(null);
     setSelectedPatient(null);
     setSelectedStudy(null);
     setStudyProfile(null);
     setPatientHistory(null);
     setSearchResults([]);
     setSearchQuery('');
+  }
+
+  if (isRadiologist && !selectedPatient) {
+    return (
+      <section className="page">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Assigned Imaging Requests</h3>
+          </div>
+
+          <p className="muted">
+            Open an imaging request assigned to your account to view its patient history and linked studies.
+          </p>
+
+          {error ? <ErrorMessage message={error} /> : null}
+
+          {loading ? (
+            <LoadingState message="Loading assigned imaging requests..." />
+          ) : assignedRequests.length === 0 ? (
+            <EmptyState
+              title="No assigned imaging requests"
+              message="Requests assigned to your account will appear here. Claim available requests from your Radiologist dashboard."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Patient</th>
+                    <th>MRN</th>
+                    <th>Examination</th>
+                    <th>Modality</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {assignedRequests.map((request) => (
+                    <tr key={request.id}>
+                      <td>{request.lastName}, {request.firstName}</td>
+                      <td>{request.mrn}</td>
+                      <td>{request.examination}</td>
+                      <td>{request.modality}</td>
+                      <td>{request.priority}</td>
+                      <td>{request.status}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={loading}
+                          onClick={() => selectAssignedRequest(request)}
+                        >
+                          Open Request
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+    );
   }
 
   if (!selectedPatient) {
@@ -166,7 +306,7 @@ export default function ScansImaging() {
               <p>{selectedPatient.first_name} {selectedPatient.last_name} · MRN {selectedPatient.mrn}</p>
             </div>
             <button type="button" className="secondary-button" onClick={handleNewSearch}>
-              Search Another Patient
+              {isRadiologist ? 'Back to Assigned Requests' : 'Search Another Patient'}
             </button>
           </div>
           {error ? <ErrorMessage message={error} /> : null}
@@ -224,7 +364,7 @@ export default function ScansImaging() {
           </div>
           <div className="button-row">
             <button type="button" className="secondary-button" onClick={handleNewSearch}>
-              Search Another Patient
+              {isRadiologist ? 'Back to Assigned Requests' : 'Search Another Patient'}
             </button>
             <button type="button" className="secondary-button">
               Save Draft

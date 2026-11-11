@@ -165,8 +165,8 @@ export function createAdminRouter({ db, audit, users, patients, schedule, alerts
 
   router.post(
     '/patient-mappings/:id/verify',
-    handle((req, res) => {
-      const mapping = patientMappings.verify(req.params.id, req.user.id);
+    handle(async (req, res) => {
+      const mapping = await patientMappings.verify(req.params.id, req.user.id);
       log(req, 'patient_mapping_verify', `patient_mapping:${mapping.id}`, 'verified a DICOM patient mapping.');
       res.json({ mapping });
     }),
@@ -174,10 +174,26 @@ export function createAdminRouter({ db, audit, users, patients, schedule, alerts
 
   router.post(
     '/patient-mappings/:id/reject',
-    handle((req, res) => {
-      const mapping = patientMappings.reject(req.params.id, req.user.id, req.body?.notes);
+    handle(async (req, res) => {
+      const { notes } = req.body || {};
+
+      if (!notes || String(notes).trim() === '') {
+        return res.status(400).json({ error: 'Rejection notes are required.' });
+      }
+
+      const mapping = patientMappings.reject(
+        req.params.id,
+        req.user.id,
+        notes,
+      );
+
+      if (!mapping) {
+        return res.status(404).json({ error: 'Patient mapping not found.' });
+      }
+
       log(req, 'patient_mapping_reject', `patient_mapping:${mapping.id}`, 'rejected a DICOM patient mapping.');
-      res.json({ mapping });
+
+      return res.json({ mapping });
     }),
   );
 

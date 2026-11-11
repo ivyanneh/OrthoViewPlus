@@ -1,5 +1,6 @@
+
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { formatRole, getInitials } from '../utils/format.js';
 import {
@@ -38,9 +39,9 @@ const radiologistSections = [
     links: [
       { to: '/dashboard', label: 'Dashboard', Icon: DashboardIcon },
       { to: '/scans', label: 'Scans & Imaging', Icon: ImageIcon },
-      { 
-        to: '/ai-tools', 
-        label: 'AI Imaging Tools', 
+      {
+        to: '/ai-tools',
+        label: 'AI Imaging Tools',
         Icon: MonitorIcon,
         submenu: [
           { to: '/ai-tools/restore', label: 'Image Restoration' },
@@ -50,7 +51,7 @@ const radiologistSections = [
           { to: '/ai-tools/segment3d', label: '3D Visualization' },
           { to: '/ai-tools/synthetic', label: 'Synthetic Generation' },
           { to: '/ai-tools/complementary', label: 'Complementary-View Synthesis' },
-        ]
+        ],
       },
       { to: '/scan-comparisons', label: 'Scan Comparisons', Icon: CompareIcon },
       { to: '/imaging-requests', label: 'Imaging Requests', Icon: UsersIcon },
@@ -64,32 +65,33 @@ const radiologistSections = [
 
 const adminSections = [
   {
-    title: 'Department',
+    title: 'Navigation',
     links: [
-      { to: '/admin/dashboard', label: 'Admin Dashboard', Icon: DashboardIcon },
-      { to: '/admin/schedule', label: 'Imaging Schedule', Icon: CalendarIcon },
-      { to: '/admin/alerts', label: 'Alerts', Icon: BellIcon },
-      { to: '/admin/modalities', label: 'Modality Monitoring', Icon: MonitorIcon },
-      { to: '/admin/imaging-studies', label: 'Orthanc Study Linking', Icon: ImageIcon },
-      { to: '/admin/patients', label: 'Patient Management', Icon: UsersIcon },
-      { to: '/notifications', label: 'Notifications', Icon: BellIcon },
-    ],
-  },
-  {
-    title: 'Administration',
-    links: [
+      { to: '/admin/dashboard', label: 'Dashboard', Icon: DashboardIcon },
       { to: '/admin/users', label: 'User Management', Icon: UsersIcon },
-      { to: '/admin/audit-logs', label: 'Audit Logs', Icon: AuditIcon },
-      { to: '/admin/system', label: 'System Administration', Icon: SettingsIcon },
+      { to: '/admin/patients-imaging', label: 'Patient Records', Icon: ImageIcon },
+      { to: '/admin/scheduling', label: 'Scheduling', Icon: CalendarIcon },
+      { to: '/admin/audit-logs', label: 'Audit & System Logs', Icon: AuditIcon },
       { to: '/admin/settings', label: 'My Profile & Settings', Icon: SettingsIcon },
     ],
   },
 ];
 
-function NavItem({ to, label, Icon, submenu, expandedSubmenus, toggleSubmenu, pathname }) {
+function NavItem({
+  to,
+  label,
+  Icon,
+  submenu,
+  expandedSubmenus,
+  toggleSubmenu,
+  pathname,
+}) {
   const hasSubmenu = submenu && submenu.length > 0;
-  const isExpanded = expandedSubmenus[to];
-  const isActive = pathname === to || (hasSubmenu && submenu.some(item => pathname === item.to));
+  const isExpanded = Boolean(expandedSubmenus[to]);
+
+  const isActive =
+    pathname === to ||
+    (hasSubmenu && submenu.some((item) => pathname === item.to));
 
   if (hasSubmenu) {
     return (
@@ -102,15 +104,20 @@ function NavItem({ to, label, Icon, submenu, expandedSubmenus, toggleSubmenu, pa
         >
           <Icon size={18} />
           <span>{label}</span>
-          {isExpanded ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
+          {isExpanded ? (
+            <ChevronDownIcon size={14} />
+          ) : (
+            <ChevronRightIcon size={14} />
+          )}
         </button>
+
         {isExpanded && (
           <div className="nav-submenu">
             {submenu.map((subItem) => (
               <NavLink
                 key={subItem.to}
                 to={subItem.to}
-                className={({ isActive: subIsActive }) => 
+                className={({ isActive: subIsActive }) =>
                   `nav-submenu-link ${subIsActive ? 'active' : ''}`
                 }
               >
@@ -124,7 +131,12 @@ function NavItem({ to, label, Icon, submenu, expandedSubmenus, toggleSubmenu, pa
   }
 
   return (
-    <NavLink to={to} className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+    <NavLink
+      to={to}
+      className={({ isActive: linkIsActive }) =>
+        linkIsActive ? 'nav-link active' : 'nav-link'
+      }
+    >
       <Icon size={18} />
       <span>{label}</span>
     </NavLink>
@@ -134,15 +146,28 @@ function NavItem({ to, label, Icon, submenu, expandedSubmenus, toggleSubmenu, pa
 export default function Sidebar() {
   const { logout, user } = useAuth();
   const { pathname } = useLocation();
+
   const isAdmin = user?.role === 'administrator';
   const isRadiologist = user?.role === 'radiologist';
-  const sections = isAdmin ? adminSections : isRadiologist ? radiologistSections : practitionerSections;
+
+  const sections = isAdmin
+    ? adminSections
+    : isRadiologist
+      ? radiologistSections
+      : practitionerSections;
+
   const [expandedSubmenus, setExpandedSubmenus] = useState({});
 
-  // Auto-expand AI Imaging Tools submenu if on an AI tool page
-  if (isRadiologist && pathname.startsWith('/ai-tools') && !expandedSubmenus['/ai-tools']) {
-    setExpandedSubmenus({ '/ai-tools': true });
-  }
+  // Automatically expand AI Imaging Tools when visiting an AI tool page.
+  useEffect(() => {
+    if (isRadiologist && pathname.startsWith('/ai-tools')) {
+      setExpandedSubmenus((prev) =>
+        prev['/ai-tools']
+          ? prev
+          : { ...prev, '/ai-tools': true }
+      );
+    }
+  }, [isRadiologist, pathname]);
 
   const toggleSubmenu = (to) => {
     setExpandedSubmenus((prev) => ({
@@ -156,6 +181,7 @@ export default function Sidebar() {
       <span className="avatar" aria-hidden="true">
         {getInitials(user.username)}
       </span>
+
       <div className="sidebar-user-text">
         <strong title={user.username}>{user.username}</strong>
         <span>{formatRole(user.role)}</span>
@@ -169,7 +195,11 @@ export default function Sidebar() {
         <LogoMark />
         <div>
           <h1>OrthoView+</h1>
-          <p>{isAdmin ? 'Department Administration' : 'Imaging Workstation'}</p>
+          <p>
+            {isAdmin
+              ? 'Department Administration'
+              : 'Imaging Workstation'}
+          </p>
         </div>
       </div>
 
@@ -177,10 +207,11 @@ export default function Sidebar() {
         {sections.map((section) => (
           <div key={section.title} className="nav-group">
             <p className="nav-section">{section.title}</p>
+
             {section.links.map((link) => (
-              <NavItem 
-                key={link.to} 
-                {...link} 
+              <NavItem
+                key={link.to}
+                {...link}
                 expandedSubmenus={expandedSubmenus}
                 toggleSubmenu={toggleSubmenu}
                 pathname={pathname}
@@ -192,12 +223,24 @@ export default function Sidebar() {
 
       <div className="sidebar-footer">
         {user && isAdmin ? (
-          <Link to="/admin/profile" className="sidebar-user sidebar-user-link" title="View administrator profile">
+          <Link
+            to="/admin/settings"
+            className="sidebar-user sidebar-user-link"
+            title="View administrator profile and settings"
+          >
             {userBlock}
           </Link>
         ) : null}
-        {user && !isAdmin ? <div className="sidebar-user">{userBlock}</div> : null}
-        <button type="button" className="logout-button" onClick={logout}>
+
+        {user && !isAdmin ? (
+          <div className="sidebar-user">{userBlock}</div>
+        ) : null}
+
+        <button
+          type="button"
+          className="logout-button"
+          onClick={logout}
+        >
           <LogoutIcon size={16} />
           <span>Logout</span>
         </button>

@@ -2975,3 +2975,63 @@ a.topbar-user:hover strong {
     flex-direction: column;
   }
 }
+
+/* =========================================================================
+   OrthoView+ shared dark theme
+   Applied to every workspace, including Administrator Profile.
+   ========================================================================= */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-deep: #091321;
+  --bg: #111c2b;
+  --surface: #182638;
+  --surface-2: #202f42;
+  --surface-3: #263c50;
+  --input: #182638;
+
+  --ink: #e7edf4;
+  --ink-2: #c5d0dc;
+  --muted: #9aaabd;
+  --faint: #8293a8;
+  --line: #34465b;
+  --line-strong: #465b72;
+
+  --accent: #35b9ad;
+  --accent-2: #35b9ad;
+  --accent-soft: #203f49;
+  --ring: rgba(53, 185, 173, 0.28);
+  --primary: #35b9ad;
+  --primary-hover: #4acbc0;
+
+  --ok: #42bd91;
+  --ok-soft: rgba(66, 189, 145, 0.14);
+  --ok-line: #287e66;
+  --warn: #efb65b;
+  --warn-soft: rgba(239, 182, 91, 0.14);
+  --warn-line: #8b672f;
+  --danger: #f07878;
+  --danger-soft: rgba(240, 120, 120, 0.14);
+  --danger-line: #914b52;
+  --info: #70b9e8;
+  --info-soft: rgba(112, 185, 232, 0.14);
+  --info-line: #426e91;
+  --neutral: #aab8c8;
+  --neutral-soft: #263548;
+  --neutral-line: #46566a;
+
+  --viewer: #060b12;
+  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+
+:root[data-theme="dark"] body {
+  color: var(--ink);
+  background: var(--bg);
+}
+
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea {
+  color-scheme: dark;
+}
+

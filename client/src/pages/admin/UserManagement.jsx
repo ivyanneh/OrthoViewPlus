@@ -15,7 +15,7 @@ const MIN_PASSWORD = 8;
 const STATUS_META = {
   active: { label: 'Active', tone: 'ok' },
   inactive: { label: 'Inactive', tone: 'neutral' },
-  removed: { label: 'Removed', tone: 'danger' },
+  restricted: { label: 'Restricted', tone: 'warn' },
 };
 
 function UserForm({ user, onClose, onSaved, isSelf }) {
@@ -271,22 +271,31 @@ export default function UserManagement() {
         </div>
       ) : null}
 
+      {/* SUMMARY STRIP WITH FIXED HIGH-CONTRAST NUMBERS */}
       <div className="summary-strip">
         <div>
           <span>Active</span>
-          <strong>{counts.active}</strong>
+          <strong style={{ color: 'var(--text-primary, #0f172a)', fontSize: '1.75rem', fontWeight: 700 }}>
+            {counts.active}
+          </strong>
         </div>
         <div>
           <span>Inactive</span>
-          <strong>{counts.inactive}</strong>
+          <strong style={{ color: 'var(--text-primary, #0f172a)', fontSize: '1.75rem', fontWeight: 700 }}>
+            {counts.inactive}
+          </strong>
         </div>
         <div>
           <span>Restricted</span>
-          <strong>{counts.restricted}</strong>
+          <strong style={{ color: 'var(--text-primary, #0f172a)', fontSize: '1.75rem', fontWeight: 700 }}>
+            {counts.restricted}
+          </strong>
         </div>
         <div>
           <span>Removed</span>
-          <strong>{counts.removed}</strong>
+          <strong style={{ color: 'var(--text-primary, #0f172a)', fontSize: '1.75rem', fontWeight: 700 }}>
+            {counts.removed}
+          </strong>
         </div>
       </div>
 
@@ -408,7 +417,7 @@ export default function UserManagement() {
                                   message: `Reinstate "${user.username}" as an active account? The user will be able to sign in again.`,
                                   confirmLabel: 'Reinstate',
                                   tone: 'primary',
-                                  request: () => api.post(`/admin/users/${user.id}/activate`),
+                                  request: () => api.post(`/admin/users/${user.id}/reinstate`),
                                   success: `Account "${user.username}" reinstated.`,
                                 })
                               }
@@ -420,92 +429,46 @@ export default function UserManagement() {
                               <button type="button" className="link-button" onClick={() => setDialog({ type: 'form', user })}>
                                 Edit
                               </button>
-                              {user.status === 'active' ? (
-                                <button
-                                  type="button"
-                                  className="link-button"
-                                  disabled={isSelf}
-                                  title={isSelf ? 'You cannot deactivate your own account' : undefined}
-                                  onClick={() =>
-                                    confirm(user, {
-                                      title: 'Deactivate account',
-                                      message: `Deactivate "${user.username}"? The user will no longer be able to sign in until the account is reactivated.`,
-                                      confirmLabel: 'Deactivate',
-                                      request: () => api.post(`/admin/users/${user.id}/deactivate`),
-                                      success: `Account "${user.username}" deactivated.`,
-                                    })
-                                  }
-                                >
-                                  Deactivate
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="link-button"
-                                  onClick={() =>
-                                    confirm(user, {
-                                      title: 'Activate account',
-                                      message: `Activate "${user.username}"? The user will be able to sign in again.`,
-                                      confirmLabel: 'Activate',
-                                      tone: 'primary',
-                                      request: () => api.post(`/admin/users/${user.id}/activate`),
-                                      success: `Account "${user.username}" activated.`,
-                                    })
-                                  }
-                                >
-                                  Activate
-                                </button>
-                              )}
                               {user.restricted ? (
                                 <button
                                   type="button"
                                   className="link-button"
                                   onClick={() =>
                                     confirm(user, {
-                                      title: 'Remove restriction',
-                                      message: `Remove the sign-in restriction for "${user.username}"?${
-                                        user.restrictionReason ? ` Current reason: ${user.restrictionReason}` : ''
-                                      }`,
-                                      confirmLabel: 'Remove restriction',
+                                      title: 'Lift restriction',
+                                      message: `Lift sign-in restriction for "${user.username}"?`,
+                                      confirmLabel: 'Lift restriction',
                                       tone: 'primary',
                                       request: () => api.post(`/admin/users/${user.id}/unrestrict`),
-                                      success: `Restriction removed for "${user.username}".`,
+                                      success: `Restriction lifted for "${user.username}".`,
                                     })
                                   }
                                 >
-                                  Lift restriction
+                                  Unrestrict
                                 </button>
                               ) : (
-                                <button
-                                  type="button"
-                                  className="link-button"
-                                  disabled={isSelf}
-                                  title={isSelf ? 'You cannot restrict your own account' : undefined}
-                                  onClick={() => {
-                                    setNotice('');
-                                    setDialog({ type: 'restrict', user });
-                                  }}
-                                >
+                                <button type="button" className="link-button danger" onClick={() => setDialog({ type: 'restrict', user })}>
                                   Restrict
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                className="link-button danger"
-                                disabled={isSelf}
-                                title={isSelf ? 'You cannot remove your own account' : undefined}
-                                onClick={() =>
-                                  confirm(user, {
-                                    title: 'Remove account',
-                                    message: `Remove "${user.username}"? The account will be archived and can no longer sign in. Audit history for this user is preserved.`,
-                                    confirmLabel: 'Remove account',
-                                    request: () => api.delete(`/admin/users/${user.id}`),
-                                    success: `Account "${user.username}" removed.`,
-                                  })
-                                }
-                              >
-                                Remove
-                              </button>
+                              {!isSelf ? (
+                                <button
+                                  type="button"
+                                  className="link-button danger"
+                                  onClick={() =>
+                                    confirm(user, {
+                                      title: 'Remove account',
+                                      message: `Mark "${user.username}" as removed? The account will be deactivated and hidden from default views.`,
+                                      confirmLabel: 'Remove account',
+                                      tone: 'danger',
+                                      request: () => api.delete(`/admin/users/${user.id}`),
+                                      success: `Account "${user.username}" marked as removed.`,
+                                    })
+                                  }
+                                >
+                                  Remove
+                                </button>
+                              ) : null}
                             </>
                           )}
                         </div>
@@ -518,7 +481,7 @@ export default function UserManagement() {
           </div>
         ) : (
           <div className="panel-body">
-            <EmptyState title="No accounts found" message="No user accounts matched the current search and filters." />
+            <EmptyState title="No accounts found" message="Try adjusting your search query or filters." />
           </div>
         )}
       </section>
@@ -526,12 +489,16 @@ export default function UserManagement() {
       {dialog?.type === 'form' ? (
         <UserForm
           user={dialog.user}
-          isSelf={Boolean(dialog.user) && Number(dialog.user.id) === Number(currentUser?.id)}
+          isSelf={Number(dialog.user?.id) === Number(currentUser?.id)}
           onClose={() => setDialog(null)}
           onSaved={done}
         />
       ) : null}
-      {dialog?.type === 'restrict' ? <RestrictDialog user={dialog.user} onClose={() => setDialog(null)} onSaved={done} /> : null}
+
+      {dialog?.type === 'restrict' ? (
+        <RestrictDialog user={dialog.user} onClose={() => setDialog(null)} onSaved={done} />
+      ) : null}
+
       {dialog?.type === 'confirm' ? <ConfirmDialog {...dialog.props} onClose={() => setDialog(null)} /> : null}
     </section>
   );

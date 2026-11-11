@@ -1,17 +1,30 @@
+
 import { AppError, cleanText } from '../utils/http.js';
 
 const SELECT = `
-  SELECT m.id, m.patient_id AS patientId, m.orthanc_patient_id AS orthancPatientId,
-         m.patient_name AS patientName, m.patient_birth_date AS patientBirthDate,
-         m.verified_at AS verifiedAt, m.verified_by AS verifiedBy, m.status, m.notes,
-         p.mrn, p.first_name AS firstName, p.last_name AS lastName,
-         verifier.username AS verifiedByUsername
+  SELECT
+    m.id,
+    m.patient_id AS patientId,
+    m.orthanc_patient_id AS orthancPatientId,
+    m.patient_name AS patientName,
+    m.patient_birth_date AS patientBirthDate,
+    m.verified_at AS verifiedAt,
+    m.verified_by AS verifiedBy,
+    m.status,
+    m.notes,
+    p.mrn,
+    p.first_name AS firstName,
+    p.last_name AS lastName,
+    verifier.username AS verifiedByUsername
   FROM patient_dicom_mappings m
   JOIN patients p ON p.id = m.patient_id
   LEFT JOIN users verifier ON verifier.id = m.verified_by
 `;
 
-export function createPatientMappingService(db, { audit } = {}) {
+export function createPatientMappingService(
+  db,
+  { audit, orthanc } = {},
+) {
   const getById = db.prepare(`${SELECT} WHERE m.id = ?`);
 
   function get(id) {
@@ -19,15 +32,27 @@ export function createPatientMappingService(db, { audit } = {}) {
   }
 
   function getByOrthancPatientId(orthancPatientId) {
-    return db.prepare(`${SELECT} WHERE m.orthanc_patient_id = ? COLLATE NOCASE`).get(String(orthancPatientId)) ?? null;
+    return db
+      .prepare(
+        `${SELECT} WHERE m.orthanc_patient_id = ? COLLATE NOCASE`,
+      )
+      .get(String(orthancPatientId)) ?? null;
   }
 
   function getByPatientId(patientId) {
-    return db.prepare(`${SELECT} WHERE m.patient_id = ?`).all(Number(patientId));
+    return db
+      .prepare(`${SELECT} WHERE m.patient_id = ?`)
+      .all(Number(patientId));
   }
 
   function getVerifiedMapping(orthancPatientId) {
-    return db.prepare(`${SELECT} WHERE m.orthanc_patient_id = ? COLLATE NOCASE AND m.status = 'verified'`).get(String(orthancPatientId)) ?? null;
+    return db
+      .prepare(
+        `${SELECT}
+         WHERE m.orthanc_patient_id = ? COLLATE NOCASE
+         AND m.status = 'verified'`,
+      )
+      .get(String(orthancPatientId)) ?? null;
   }
 
   return {
@@ -38,112 +63,356 @@ export function createPatientMappingService(db, { audit } = {}) {
 
     list({ status, patientId, limit = 100 } = {}) {
       const clauses = [];
-      const params = { limit: Math.min(Math.max(Number(limit) || 100, 1), 500) };
+      const params = {
+        limit: Math.min(Math.max(Number(limit) || 100, 1), 500),
+      };
+
       if (status && status !== 'all') {
         clauses.push('m.status = @status');
         params.status = status;
       }
+
       if (patientId) {
         clauses.push('m.patient_id = @patientId');
         params.patientId = Number(patientId);
       }
-      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-      return db.prepare(`${SELECT} ${where} ORDER BY m.verified_at DESC LIMIT @limit`).all(params);
+
+      const where = clauses.length
+        ? `WHERE ${clauses.join(' AND ')}`
+        : '';
+
+      return db
+        .prepare(
+          `${SELECT} ${where}
+           ORDER BY m.verified_at DESC
+           LIMIT @limit`,
+        )
+        .all(params);
     },
 
-    create({ patientId, orthancPatientId, patientName, patientBirthDate, notes, verifiedBy }) {
-      const patient = db.prepare('SELECT id, mrn FROM patients WHERE id = ? AND status = ?').get(Number(patientId), 'active');
+    create({
+      patientId,
+      orthancPatientId,
+      patientName,
+      patientBirthDate,
+      notes,
+      verifiedBy,
+    }) {
+      const cleanOrthancPatientId = cleanText(
+        orthancPatientId,
+        64,
+      );
+
+      if (!cleanOrthancPatientId) {
+        throw new AppError(
+          'A valid Orthanc PatientID is required.',
+          400,
+        );
+      }
+
+      const patient = db
+        .prepare(
+          'SELECT id, mrn FROM patients WHERE id = ? AND status = ?',
+        )
+        .get(Number(patientId), 'active');
+
       if (!patient) {
         throw new AppError('Patient not found or archived.', 404);
       }
 
-      const existingVerified = db.prepare('SELECT id FROM patient_dicom_mappings WHERE orthanc_patient_id = ? COLLATE NOCASE AND status = ?').get(String(orthancPatientId), 'verified');
+      const existingVerified = db
+        .prepare(
+          `SELECT id
+           FROM patient_dicom_mappings
+           WHERE orthanc_patient_id = ? COLLATE NOCASE
+           AND status = 'verified'`,
+        )
+        .get(cleanOrthancPatientId);
+
       if (existingVerified) {
-        throw new AppError('This Orthanc PatientID is already verified to a different patient.', 409);
+        throw new AppError(
+          'This Orthanc PatientID is already verified.',
+          409,
+        );
       }
 
-      const existingPending = db.prepare('SELECT id FROM patient_dicom_mappings WHERE patient_id = ? AND orthanc_patient_id = ? COLLATE NOCASE').get(Number(patientId), String(orthancPatientId));
-      if (existingPending) {
-        return get(existingPending.id);
+      const existing = db
+        .prepare(
+          `SELECT id, status
+           FROM patient_dicom_mappings
+           WHERE patient_id = ?
+           AND orthanc_patient_id = ? COLLATE NOCASE`,
+        )
+        .get(Number(patientId), cleanOrthancPatientId);
+
+      if (existing?.status === 'pending') {
+        return get(existing.id);
+      }
+
+      if (existing?.status === 'verified') {
+        throw new AppError(
+          'This patient mapping is already verified.',
+          409,
+        );
+      }
+
+      if (existing?.status === 'rejected') {
+        const updateResult = db
+          .prepare(
+            `UPDATE patient_dicom_mappings
+             SET status = 'pending',
+                 patient_name = ?,
+                 patient_birth_date = ?,
+                 notes = ?,
+                 verified_by = NULL,
+                 verified_at = NULL
+             WHERE id = ?
+             AND status = 'rejected'`,
+          )
+          .run(
+            cleanText(patientName, 255) ?? null,
+            cleanText(patientBirthDate, 10) ?? null,
+            cleanText(notes, 500) ?? null,
+            existing.id,
+          );
+
+        if (updateResult.changes !== 1) {
+          throw new AppError(
+            'The rejected mapping could not be reopened.',
+            409,
+          );
+        }
+
+        audit?.log({
+          userId: verifiedBy,
+          action: 'patient_mapping_reopened',
+          target: `patient_mapping:${existing.id}`,
+          description: `Reopened the DICOM mapping for patient record ${patient.id}.`,
+        });
+
+        return get(existing.id);
       }
 
       const result = db
         .prepare(
           `INSERT INTO patient_dicom_mappings (
-             patient_id, orthanc_patient_id, patient_name, patient_birth_date, notes, verified_by, status
-           ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+            patient_id,
+            orthanc_patient_id,
+            patient_name,
+            patient_birth_date,
+            notes,
+            verified_by,
+            status
+          ) VALUES (?, ?, ?, ?, ?, NULL, 'pending')`,
         )
         .run(
           patient.id,
-          cleanText(orthancPatientId, 64),
+          cleanOrthancPatientId,
           cleanText(patientName, 255) ?? null,
           cleanText(patientBirthDate, 10) ?? null,
           cleanText(notes, 500) ?? null,
-          verifiedBy ?? null,
         );
 
       audit?.log({
         userId: verifiedBy,
         action: 'patient_mapping_created',
         target: `patient_mapping:${result.lastInsertRowid}`,
-        description: `Created pending DICOM mapping for patient ${patient.mrn} to Orthanc PatientID ${orthancPatientId}.`,
+        description: `Created a pending DICOM mapping for patient record ${patient.id}.`,
       });
 
       return get(result.lastInsertRowid);
     },
 
-    verify(id, verifiedBy) {
+    async verify(id, verifiedBy) {
       const mapping = get(Number(id));
+
       if (!mapping) {
         throw new AppError('Patient mapping not found.', 404);
       }
+
       if (mapping.status === 'verified') {
-        throw new AppError('This mapping is already verified.', 409);
+        throw new AppError(
+          'This mapping is already verified.',
+          409,
+        );
       }
+
       if (mapping.status !== 'pending') {
-        throw new AppError('Only pending mappings can be verified.', 409);
+        throw new AppError(
+          'Only pending mappings can be verified.',
+          409,
+        );
       }
 
-      const existingVerified = db.prepare('SELECT id FROM patient_dicom_mappings WHERE orthanc_patient_id = ? COLLATE NOCASE AND status = ? AND id != ?').get(mapping.orthancPatientId, 'verified', mapping.id);
+      if (
+        !orthanc ||
+        typeof orthanc.findPatientByDicomPatientId !== 'function'
+      ) {
+        throw new AppError(
+          'Orthanc identity verification is unavailable.',
+          503,
+        );
+      }
+
+      const existingVerified = db
+        .prepare(
+          `SELECT id
+           FROM patient_dicom_mappings
+           WHERE orthanc_patient_id = ? COLLATE NOCASE
+           AND status = 'verified'
+           AND id != ?`,
+        )
+        .get(mapping.orthancPatientId, mapping.id);
+
       if (existingVerified) {
-        throw new AppError('This Orthanc PatientID is already verified to a different patient.', 409);
+        throw new AppError(
+          'This Orthanc PatientID is already verified to another mapping.',
+          409,
+        );
       }
 
-      db.prepare(`UPDATE patient_dicom_mappings SET status = 'verified', verified_by = ?, verified_at = datetime('now') WHERE id = ?`).run(verifiedBy, mapping.id);
+      let orthancPatient;
+
+      try {
+        orthancPatient =
+          await orthanc.findPatientByDicomPatientId(
+            mapping.orthancPatientId,
+          );
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
+        }
+
+        throw new AppError(
+          'Unable to confirm the DICOM identity with Orthanc.',
+          503,
+        );
+      }
+
+      if (!orthancPatient) {
+        throw new AppError(
+          'The DICOM patient was not found in Orthanc.',
+          404,
+        );
+      }
+
+      const patient = db
+        .prepare(
+          'SELECT id, mrn FROM patients WHERE id = ? AND status = ?',
+        )
+        .get(mapping.patientId, 'active');
+
+      if (!patient) {
+        throw new AppError('Patient not found or archived.', 404);
+      }
+
+      const dicomPatientId = String(
+        orthancPatient.PatientID ?? '',
+      ).trim();
+
+      const patientMrn = String(patient.mrn ?? '').trim();
+
+      if (
+        !dicomPatientId ||
+        !patientMrn ||
+        dicomPatientId !== patientMrn
+      ) {
+        throw new AppError(
+          'The Orthanc DICOM PatientID does not match the selected patient.',
+          409,
+        );
+      }
+
+      let updateResult;
+
+      try {
+        updateResult = db
+          .prepare(
+            `UPDATE patient_dicom_mappings
+             SET status = 'verified',
+                 verified_by = ?,
+                 verified_at = datetime('now')
+             WHERE id = ?
+             AND status = 'pending'`,
+          )
+          .run(verifiedBy, mapping.id);
+      } catch (error) {
+        if (
+          String(error.code ?? '').startsWith('SQLITE_CONSTRAINT')
+        ) {
+          throw new AppError(
+            'This Orthanc PatientID is already assigned to another verified mapping.',
+            409,
+          );
+        }
+
+        throw error;
+      }
+
+      if (updateResult.changes !== 1) {
+        throw new AppError(
+          'The mapping could not be verified because its status changed.',
+          409,
+        );
+      }
 
       audit?.log({
         userId: verifiedBy,
         action: 'patient_mapping_verified',
         target: `patient_mapping:${mapping.id}`,
-        description: `Verified DICOM mapping for patient ${mapping.mrn} to Orthanc PatientID ${mapping.orthancPatientId}.`,
+        description: `Verified the DICOM mapping for patient record ${mapping.patientId}.`,
       });
 
       return get(mapping.id);
     },
 
-    reject(id, verifiedBy, notes) {
+    reject(id, rejectedBy, notes) {
       const mapping = get(Number(id));
+
       if (!mapping) {
         throw new AppError('Patient mapping not found.', 404);
       }
-      if (mapping.status === 'rejected') {
-        throw new AppError('This mapping is already rejected.', 409);
-      }
+
       if (mapping.status !== 'pending') {
-        throw new AppError('Only pending mappings can be rejected.', 409);
+        throw new AppError(
+          'Only pending mappings can be rejected.',
+          409,
+        );
       }
 
-      db.prepare(`UPDATE patient_dicom_mappings SET status = 'rejected', verified_by = ?, notes = ?, verified_at = datetime('now') WHERE id = ?`).run(
-        verifiedBy,
-        cleanText(notes, 500) ?? null,
-        mapping.id,
-      );
+      const rejectionReason = cleanText(notes, 500);
+
+      if (!rejectionReason) {
+        throw new AppError(
+          'A rejection reason is required.',
+          400,
+        );
+      }
+
+      const updateResult = db
+        .prepare(
+          `UPDATE patient_dicom_mappings
+           SET status = 'rejected',
+               notes = ?,
+               verified_by = NULL,
+               verified_at = NULL
+           WHERE id = ?
+           AND status = 'pending'`,
+        )
+        .run(rejectionReason, mapping.id);
+
+      if (updateResult.changes !== 1) {
+        throw new AppError(
+          'The mapping could not be rejected because its status changed.',
+          409,
+        );
+      }
 
       audit?.log({
-        userId: verifiedBy,
+        userId: rejectedBy,
         action: 'patient_mapping_rejected',
         target: `patient_mapping:${mapping.id}`,
-        description: `Rejected DICOM mapping for patient ${mapping.mrn} to Orthanc PatientID ${mapping.orthancPatientId}.`,
+        description: `Rejected the DICOM mapping for patient record ${mapping.patientId}.`,
       });
 
       return get(mapping.id);

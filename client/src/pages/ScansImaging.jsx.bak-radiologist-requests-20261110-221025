@@ -1,0 +1,361 @@
+import { useState } from 'react';
+import api from '../api/client.js';
+import DicomViewer from '../components/DicomViewer.jsx';
+import EmptyState from '../components/EmptyState.jsx';
+import ErrorMessage from '../components/ErrorMessage.jsx';
+import LoadingState from '../components/LoadingState.jsx';
+import Modal from '../components/Modal.jsx';
+import { getApiError } from '../utils/format.js';
+
+export default function ScansImaging() {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchType, setSearchType] = useState('patientId');
+  const [searchResults, setSearchResults] = useState([]);
+  const [selectedPatient, setSelectedPatient] = useState(null);
+  const [selectedStudy, setSelectedStudy] = useState(null);
+  const [studyProfile, setStudyProfile] = useState(null);
+  const [patientHistory, setPatientHistory] = useState(null);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSearch() {
+    if (!searchQuery.trim()) return;
+    
+    setError('');
+    setLoading(true);
+    try {
+      const response = await api.get('/clinical/patients', {
+        params: {
+          q: searchQuery,
+          limit: 20,
+        },
+      });
+      setSearchResults(response.data.patients || []);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to search for patients.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function selectPatient(patient) {
+    setSelectedPatient(patient);
+    setSelectedStudy(null);
+    setStudyProfile(null);
+    setError('');
+    
+    try {
+      const historyResponse = await api.get(`/clinical/patients/${patient.id}`);
+      setPatientHistory(historyResponse.data);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load patient history.'));
+    }
+  }
+
+  async function selectStudy(study) {
+    setSelectedStudy(study);
+    setError('');
+    setLoading(true);
+    
+    try {
+      const response = await api.get(`/imaging/studies/${encodeURIComponent(study.orthancStudyId)}`);
+      setStudyProfile(response.data);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load study details.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleNewSearch() {
+    setSelectedPatient(null);
+    setSelectedStudy(null);
+    setStudyProfile(null);
+    setPatientHistory(null);
+    setSearchResults([]);
+    setSearchQuery('');
+  }
+
+  if (!selectedPatient) {
+    return (
+      <section className="page">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Search for Patient</h3>
+          </div>
+          <div className="filter-bar">
+            <div className="field inline-field grow">
+              <label htmlFor="search-type">Search by</label>
+              <select
+                id="search-type"
+                value={searchType}
+                onChange={(e) => setSearchType(e.target.value)}
+              >
+                <option value="patientId">Patient ID</option>
+                <option value="patientName">Patient Name</option>
+              </select>
+            </div>
+            <div className="field inline-field grow">
+              <label htmlFor="search-query">Search</label>
+              <input
+                id="search-query"
+                type="text"
+                placeholder={searchType === 'patientId' ? 'Enter patient ID' : 'Enter patient name'}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              />
+            </div>
+            <button type="button" className="primary-button" onClick={handleSearch} disabled={loading}>
+              {loading ? 'Searching...' : 'Search'}
+            </button>
+          </div>
+          {error ? <ErrorMessage message={error} /> : null}
+          {searchResults.length > 0 ? (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Patient ID</th>
+                    <th>Name</th>
+                    <th>Date of Birth</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {searchResults.map((patient) => (
+                    <tr key={patient.id}>
+                      <td>{patient.mrn}</td>
+                      <td>{patient.first_name} {patient.last_name}</td>
+                      <td>{patient.date_of_birth || 'N/A'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => selectPatient(patient)}
+                        >
+                          Select
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              title="Enter patient search criteria"
+              message="Search by patient ID or name to access imaging studies."
+            />
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  if (!selectedStudy) {
+    const studies = patientHistory?.history?.studies || [];
+    
+    return (
+      <section className="page">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h3>Patient Studies</h3>
+              <p>{selectedPatient.first_name} {selectedPatient.last_name} · MRN {selectedPatient.mrn}</p>
+            </div>
+            <button type="button" className="secondary-button" onClick={handleNewSearch}>
+              Search Another Patient
+            </button>
+          </div>
+          {error ? <ErrorMessage message={error} /> : null}
+          {studies.length === 0 ? (
+            <EmptyState
+              title="No imaging studies found"
+              message="This patient has no linked imaging studies available."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Study Date</th>
+                    <th>Modality</th>
+                    <th>Description</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studies.map((study) => (
+                    <tr key={study.id}>
+                      <td>{study.study_date || 'N/A'}</td>
+                      <td>{study.modality || 'N/A'}</td>
+                      <td>{study.description || 'N/A'}</td>
+                      <td>{study.source || 'original'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => selectStudy(study)}
+                        >
+                          Open Study
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="page">
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h3>Imaging Workspace</h3>
+            <p>{selectedPatient.first_name} {selectedPatient.last_name} · MRN {selectedPatient.mrn}</p>
+          </div>
+          <div className="button-row">
+            <button type="button" className="secondary-button" onClick={handleNewSearch}>
+              Search Another Patient
+            </button>
+            <button type="button" className="secondary-button">
+              Save Draft
+            </button>
+            <button type="button" className="secondary-button">
+              Save Copy
+            </button>
+          </div>
+        </div>
+        {error ? <ErrorMessage message={error} /> : null}
+        {loading ? <LoadingState message="Loading study..." /> : null}
+        {studyProfile ? (
+          <>
+            <DicomViewer study={selectedStudy} profile={studyProfile} />
+            <div className="panel">
+              <div className="panel-header">
+                <h3>Patient Information</h3>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setShowHistoryModal(true)}
+                >
+                  View Patient History
+                </button>
+              </div>
+              <div className="panel-body">
+                <div className="detail-grid">
+                  <div>
+                    <dt>Patient Name</dt>
+                    <dd>{selectedPatient.first_name} {selectedPatient.last_name}</dd>
+                  </div>
+                  <div>
+                    <dt>Patient ID</dt>
+                    <dd>{selectedPatient.mrn}</dd>
+                  </div>
+                  <div>
+                    <dt>Date of Birth</dt>
+                    <dd>{selectedPatient.date_of_birth || 'N/A'}</dd>
+                  </div>
+                  <div>
+                    <dt>Sex</dt>
+                    <dd>{selectedPatient.sex || 'N/A'}</dd>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="panel">
+              <div className="panel-header">
+                <h3>Exposure Index & Image Quality</h3>
+              </div>
+              <div className="panel-body">
+                <div className="detail-grid">
+                  <div>
+                    <dt>Exposure Index (EI)</dt>
+                    <dd>{studyProfile.study?.exposureIndex || 'Unavailable'}</dd>
+                  </div>
+                  <div>
+                    <dt>Target EI</dt>
+                    <dd>{studyProfile.study?.targetEI || 'Unavailable'}</dd>
+                  </div>
+                  <div>
+                    <dt>Deviation Index (DI)</dt>
+                    <dd>{studyProfile.study?.deviationIndex || 'Unavailable'}</dd>
+                  </div>
+                  <div>
+                    <dt>Exposure Status</dt>
+                    <dd>{studyProfile.study?.exposureStatus || 'Unavailable'}</dd>
+                  </div>
+                </div>
+                <p className="field-hint" style={{ marginTop: '1rem' }}>
+                  EI measures detector exposure, not actual absorbed patient dose. Acceptable EI values do not guarantee image diagnostic adequacy.
+                </p>
+              </div>
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      {showHistoryModal && patientHistory ? (
+        <Modal onClose={() => setShowHistoryModal(false)} title="Patient History">
+          <div className="modal-body">
+            <h4>Patient Information</h4>
+            <div className="detail-grid">
+              <div>
+                <dt>Name</dt>
+                <dd>{patientHistory.patient?.first_name} {patientHistory.patient?.last_name}</dd>
+              </div>
+              <div>
+                <dt>MRN</dt>
+                <dd>{patientHistory.patient?.mrn}</dd>
+              </div>
+              <div>
+                <dt>Date of Birth</dt>
+                <dd>{patientHistory.patient?.date_of_birth || 'N/A'}</dd>
+              </div>
+            </div>
+            
+            <h4 style={{ marginTop: '1.5rem' }}>Medical History</h4>
+            <p>{patientHistory.patient?.notes || 'No medical history available.'}</p>
+            
+            <h4 style={{ marginTop: '1.5rem' }}>Previous Imaging Examinations</h4>
+            {patientHistory.history?.studies?.length > 0 ? (
+              <table className="data-table compact-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Modality</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {patientHistory.history.studies.map((study) => (
+                    <tr key={study.id}>
+                      <td>{study.study_date || 'N/A'}</td>
+                      <td>{study.modality || 'N/A'}</td>
+                      <td>{study.description || 'N/A'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="muted">No previous imaging examinations found.</p>
+            )}
+          </div>
+          <div className="modal-footer">
+            <button type="button" className="secondary-button" onClick={() => setShowHistoryModal(false)}>
+              Close
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+    </section>
+  );
+}

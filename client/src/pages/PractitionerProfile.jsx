@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client.js';
-import { Modal, Button } from '../components/Modal.jsx';
-import { StatusBadge } from '../components/StatusBadge.jsx';
+import Modal from '../components/Modal.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
 export default function PractitionerProfile() {
@@ -18,6 +17,7 @@ export default function PractitionerProfile() {
     registrationNumber: ''
   });
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -51,7 +51,9 @@ export default function PractitionerProfile() {
     setSaving(true);
     try {
       await api.patch('/clinical/users/me', editForm);
-      await loadProfile();
+      const response = await api.get('/clinical/users/me');
+      setProfile(response.data.user);
+      setEditForm({ fullName: response.data.user.full_name || '', email: response.data.user.email || '', phone: response.data.user.phone || '', specialisation: response.data.user.specialisation || '', department: response.data.user.department || '', facility: response.data.user.facility || '', registrationNumber: response.data.user.registration_number || '' });
       setShowEditModal(false);
       setSuccess('Profile updated successfully.');
     } catch (err) {
@@ -97,7 +99,7 @@ export default function PractitionerProfile() {
             <div><dt>Specialisation</dt><dd>{profile?.specialisation || 'Not set'}</dd></div>
             <div><dt>Department</dt><dd>{profile?.department || 'Not set'}</dd></div>
             <div><dt>Facility</dt><dd>{profile?.facility || 'Not set'}</dd></div>
-            <div><dt>Registration Number</dt><dd>{profile?.registrationNumber || 'N/A'}</dd></div>
+            <div><dt>Registration Number</dt><dd>{profile?.registration_number || 'N/A'}</dd></div>
           </div>
         </div>
       </div>

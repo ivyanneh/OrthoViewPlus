@@ -1,6 +1,7 @@
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import LoadingState from './LoadingState.jsx';
+import { homePathFor } from '../utils/format.js';
 
 export default function AdminRoute({ children }) {
   const { ready, user } = useAuth();
@@ -10,7 +11,7 @@ export default function AdminRoute({ children }) {
   }
 
   if (user?.role !== 'administrator') {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={user ? homePathFor(user.role) : '/login'} replace />;
   }
 
   return children;

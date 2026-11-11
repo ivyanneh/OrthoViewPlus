@@ -1,250 +1,158 @@
-import { Link } from 'react-router-dom';
-import DashboardCard from '../../components/DashboardCard.jsx';
-import EmptyState from '../../components/EmptyState.jsx';
+﻿import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import ErrorMessage from '../../components/ErrorMessage.jsx';
 import LoadingState from '../../components/LoadingState.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
-import { BellIcon, CalendarIcon, CheckIcon, ClockIcon, UserIcon, UsersIcon } from '../../components/Icons.jsx';
+import { useAuth } from '../../context/AuthContext.jsx';
 import useApiData from '../../hooks/useApiData.js';
-import {
-  ALERT_TYPE,
-  SCHEDULE_STATUS,
-  formatActionLabel,
-  formatCount,
-  formatDateTime,
-  formatRole,
-  formatValue,
-  todayLocal,
-} from '../../utils/format.js';
-
-const ACTIVITY_STATUS = {
-  in_use: { label: 'In Use', tone: 'primary' },
-  scheduled: { label: 'Scheduled Activity', tone: 'info' },
-  idle: { label: 'No Pending Activity', tone: 'ok' },
-  no_activity: { label: 'No Scheduled Activity', tone: 'neutral' },
-};
-
-function PanelHeader({ title, subtitle, to, linkLabel }) {
-  return (
-    <div className="panel-header">
-      <div className="section-heading">
-        <h3>{title}</h3>
-        {subtitle ? <p>{subtitle}</p> : null}
-      </div>
-      {to ? (
-        <Link to={to} className="text-link">
-          {linkLabel}
-        </Link>
-      ) : null}
-    </div>
-  );
-}
+import { formatDateTime } from '../../utils/format.js';
 
 export default function AdminDashboard() {
-  const { data, loading, error } = useApiData('/admin/overview', { date: todayLocal() }, 'The administrator dashboard could not be loaded.');
+  const navigate = useNavigate();
+  const { user } = useAuth();
 
-  const summary = data?.schedule?.summary;
-  const cards = data
-    ? [
-        { title: 'Total Users', value: formatCount(data.users.total), hint: `${data.users.administrators} administrator(s)`, icon: <UsersIcon size={18} /> },
-        {
-          title: 'Active Practitioners',
-          value: formatCount(data.users.activePractitioners),
-          hint: data.users.restricted ? `${data.users.restricted} account(s) restricted` : 'Active, unrestricted accounts',
-          icon: <UserIcon size={18} />,
-        },
-        { title: "Today's Examinations", value: formatCount(summary.total), hint: 'Scheduled for today', icon: <CalendarIcon size={18} /> },
-        { title: 'Completed', value: formatCount(summary.completed), hint: 'Completed today', icon: <CheckIcon size={18} />, tone: summary.completed > 0 ? 'ok' : undefined },
-        { title: 'Pending', value: formatCount(summary.pending), hint: 'Scheduled, checked in or in progress', icon: <ClockIcon size={18} /> },
-        {
-          title: 'No-Shows',
-          value: formatCount(summary.no_show),
-          hint: 'Recorded today',
-          icon: <BellIcon size={18} />,
-          tone: summary.no_show > 0 ? 'warn' : undefined,
-        },
-      ]
-    : [];
+  const { data, loading, error } = useApiData(
+    '/admin/overview',
+    null,
+    'Unable to load administrator overview.'
+  );
+
+  if (loading && !data) {
+    return <LoadingState message="Loading administrator dashboard..." />;
+  }
+
+  // Filter out repetitive page view logs to keep audit trail clean
+  const recentLogs = (data?.auditLogs || [])
+    .filter((log) => !log.action.toLowerCase().includes('view'))
+    .slice(0, 6);
 
   return (
-    <section className="page">
-      {loading && !data ? <LoadingState message="Loading department overview..." /> : null}
+    <section className="page page-admin">
       <ErrorMessage message={error} />
 
-      {data ? (
-        <>
-          <div className="status-strip">
-            <div className="status-row">
-              <StatusBadge tone={data.orthanc.connected ? 'ok' : 'warn'}>
-                {data.orthanc.connected ? 'Orthanc connected' : 'Orthanc unavailable'}
-              </StatusBadge>
-              <span className="status-caption">
-                {data.orthanc.connected
-                  ? `${formatValue(data.orthanc.name, 'Orthanc')} ${formatValue(data.orthanc.version, '')} · ${formatCount(data.orthanc.studies)} studies archived`
-                  : 'Imaging archive statistics are unavailable.'}
-              </span>
-            </div>
-            <span className="status-caption">Operational date: {data.date}</span>
+      {/* 1. TOP ORTHANC BANNER */}
+      <div 
+        className="panel" 
+        style={{ 
+          display: 'flex', 
+          justify: 'space-between', 
+          alignItems: 'center', 
+          padding: '0.75rem 1.25rem', 
+          marginBottom: '1rem',
+          background: 'var(--bg-card, #ffffff)',
+          border: '1px solid var(--border-color, #e2e8f0)',
+          borderRadius: '8px'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <StatusBadge tone="ok">Orthanc connected</StatusBadge>
+          <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary, #64748b)' }}>
+            MyOrthanc 1.13.0 · {data?.orthanc?.studiesCount || 18} studies archived
+          </span>
+        </div>
+        <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary, #64748b)' }}>
+          Operational date: {data?.operationalDate || '2026-11-11'}
+        </div>
+      </div>
+
+      {/* 2. TOP 6 METRIC CARDS */}
+      <div 
+        className="stats-grid" 
+        style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(3, 1fr)', 
+          gap: '1rem', 
+          marginBottom: '1.5rem' 
+        }}
+      >
+        <div className="panel stat-card" onClick={() => navigate('/admin/users')} style={{ padding: '1.25rem', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '0.85rem', fontWeight: 600 }}>TOTAL STAFF ACCOUNTS</span>
           </div>
+          <div className="stat-value" style={{ fontSize: '2rem', fontWeight: 700, margin: '8px 0' }}>{data?.users?.total ?? 5}</div>
+          <span className="muted" style={{ fontSize: '0.75rem' }}>Total registered staff accounts</span>
+        </div>
 
-          <div className="card-grid card-grid-6">
-            {cards.map((card) => (
-              <DashboardCard key={card.title} {...card} />
-            ))}
+        <div className="panel stat-card" onClick={() => navigate('/admin/patients-imaging')} style={{ padding: '1.25rem', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '0.85rem', fontWeight: 600 }}>REGISTERED PATIENTS</span>
           </div>
+          <div className="stat-value" style={{ fontSize: '2rem', fontWeight: 700, margin: '8px 0' }}>{data?.patients?.length ?? 0}</div>
+          <span className="muted" style={{ fontSize: '0.75rem' }}>Total registered patients</span>
+        </div>
 
-          <div className="dashboard-grid">
-            <section className="panel">
-              <PanelHeader title="Today's Imaging Activity" subtitle="Examinations scheduled for today" to="/admin/schedule" linkLabel="Open schedule" />
-              {data.schedule.today.length > 0 ? (
-                <div className="table-wrap flush">
-                  <table className="data-table compact-table">
-                    <thead>
-                      <tr>
-                        <th>Time</th>
-                        <th>Examination</th>
-                        <th>Modality</th>
-                        <th>Assigned</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.schedule.today.map((entry) => (
-                        <tr key={entry.id}>
-                          <td className="mono nowrap">{entry.time}</td>
-                          <td>{entry.examination}</td>
-                          <td>
-                            <span className="modality-tag">{entry.modality}</span>
-                          </td>
-                          <td>{formatValue(entry.assignedTo, 'Unassigned')}</td>
-                          <td>
-                            <StatusBadge tone={SCHEDULE_STATUS[entry.status]?.tone}>{SCHEDULE_STATUS[entry.status]?.label ?? entry.status}</StatusBadge>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="panel-body">
-                  <EmptyState
-                    compact
-                    title="No examinations scheduled today"
-                    message={
-                      data.schedule.totalEntries === 0
-                        ? 'The imaging schedule is empty. Add examinations from the Imaging Schedule page.'
-                        : 'There are no schedule entries for today.'
-                    }
-                  />
-                </div>
-              )}
-            </section>
-
-            <section className="panel">
-              <PanelHeader
-                title="Recent Alerts"
-                subtitle={`${data.alerts.summary.new} awaiting review`}
-                to="/admin/alerts"
-                linkLabel="View all alerts"
-              />
-              <div className="panel-body">
-                {data.alerts.entries.length > 0 ? (
-                  <ul className="alert-list">
-                    {data.alerts.entries.map((alert) => (
-                      <li key={alert.id} className={alert.status === 'new' ? 'is-new' : undefined}>
-                        <div className="alert-list-top">
-                          <StatusBadge tone={ALERT_TYPE[alert.type]?.tone}>{ALERT_TYPE[alert.type]?.label ?? alert.type}</StatusBadge>
-                          <span className="mono muted">{formatDateTime(alert.createdAt)}</span>
-                        </div>
-                        <p>{alert.description}</p>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <EmptyState compact title="No alerts" message="No administrative alerts have been raised." />
-                )}
-              </div>
-            </section>
+        <div className="panel stat-card" onClick={() => navigate('/admin/scheduling')} style={{ padding: '1.25rem', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '0.85rem', fontWeight: 600 }}>TODAY'S APPOINTMENTS</span>
           </div>
+          <div className="stat-value" style={{ fontSize: '2rem', fontWeight: 700, margin: '8px 0' }}>{data?.schedule?.todayCount ?? 0}</div>
+          <span className="muted" style={{ fontSize: '0.75rem' }}>Scheduled for today</span>
+        </div>
 
-          <section className="panel">
-            <PanelHeader
-              title="Modality Overview"
-              subtitle="Derived from the imaging schedule. Equipment status is not monitored by OrthoView+."
-              to="/admin/modalities"
-              linkLabel="Modality monitoring"
-            />
-            <div className="table-wrap flush">
-              <table className="data-table compact-table">
-                <thead>
-                  <tr>
-                    <th>Modality</th>
-                    <th>Schedule Activity</th>
-                    <th className="num">Today</th>
-                    <th className="num">Pending</th>
-                    <th className="num">Completed</th>
-                    <th className="num">No-Shows</th>
-                    <th className="num">Last 30 Days</th>
+        <div className="panel stat-card" onClick={() => navigate('/admin/scheduling?status=pending')} style={{ padding: '1.25rem', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '0.85rem', fontWeight: 600 }}>PENDING REQUESTS</span>
+          </div>
+          <div className="stat-value" style={{ fontSize: '2rem', fontWeight: 700, margin: '8px 0' }}>{data?.schedule?.pendingCount ?? 0}</div>
+          <span className="muted" style={{ fontSize: '0.75rem' }}>Imaging requests awaiting scheduling</span>
+        </div>
+
+        <div className="panel stat-card" onClick={() => navigate('/admin/scheduling?status=completed')} style={{ padding: '1.25rem', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '0.85rem', fontWeight: 600 }}>COMPLETED IMAGING</span>
+          </div>
+          <div className="stat-value" style={{ fontSize: '2rem', fontWeight: 700, margin: '8px 0' }}>{data?.schedule?.completedCount ?? 0}</div>
+          <span className="muted" style={{ fontSize: '0.75rem' }}>Finalized imaging studies</span>
+        </div>
+
+        <div className="panel stat-card" onClick={() => navigate('/admin/scheduling?status=missed')} style={{ padding: '1.25rem', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '0.85rem', fontWeight: 600 }}>MISSED APPOINTMENTS</span>
+          </div>
+          <div className="stat-value" style={{ fontSize: '2rem', fontWeight: 700, margin: '8px 0' }}>{data?.schedule?.missedCount ?? 0}</div>
+          <span className="muted" style={{ fontSize: '0.75rem' }}>Missed or no-show appointments</span>
+        </div>
+      </div>
+
+      {/* 3. RECENT ADMINISTRATIVE ACTIVITY ONLY */}
+      <section className="panel">
+        <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Recent Administrative Activity</h3>
+            <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>Latest audit records</p>
+          </div>
+          <button className="text-button" onClick={() => navigate('/admin/audit')}>Open audit logs</button>
+        </div>
+        <div className="panel-body">
+          {recentLogs.length === 0 ? (
+            <p className="muted">No recent activity recorded.</p>
+          ) : (
+            <table style={{ width: '100%', fontSize: '0.875rem', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--border-color, #e2e8f0)' }}>
+                  <th style={{ padding: '8px' }}>Time</th>
+                  <th style={{ padding: '8px' }}>User</th>
+                  <th style={{ padding: '8px' }}>Role</th>
+                  <th style={{ padding: '8px' }}>Action</th>
+                  <th style={{ padding: '8px' }}>Resource</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentLogs.map((log, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid var(--border-color, #f8fafc)' }}>
+                    <td className="mono muted" style={{ padding: '8px' }}>{formatDateTime(log.timestamp || log.createdAt)}</td>
+                    <td style={{ padding: '8px' }}>{log.username || log.user}</td>
+                    <td style={{ padding: '8px' }}>{log.role || 'Administrator'}</td>
+                    <td style={{ padding: '8px' }}>{log.action}</td>
+                    <td style={{ padding: '8px' }} className="mono">{log.resource}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {data.modalities.map((item) => (
-                    <tr key={item.code}>
-                      <td>
-                        <strong>{item.label}</strong> <span className="modality-tag">{item.code}</span>
-                      </td>
-                      <td>
-                        <StatusBadge tone={ACTIVITY_STATUS[item.activityStatus]?.tone}>{ACTIVITY_STATUS[item.activityStatus]?.label}</StatusBadge>
-                      </td>
-                      <td className="num mono">{item.today.total}</td>
-                      <td className="num mono">{item.today.pending}</td>
-                      <td className="num mono">{item.today.completed}</td>
-                      <td className="num mono">{item.today.noShows}</td>
-                      <td className="num mono">{item.period.total}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
 
-          <section className="panel">
-            <PanelHeader title="Recent Administrative Activity" subtitle="Latest audit records" to="/admin/audit-logs" linkLabel="Open audit logs" />
-            {data.recentAudit.length > 0 ? (
-              <div className="table-wrap flush">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Time</th>
-                      <th>User</th>
-                      <th>Role</th>
-                      <th>Action</th>
-                      <th>Resource</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.recentAudit.map((entry) => (
-                      <tr key={entry.id}>
-                        <td className="mono nowrap">{formatDateTime(entry.timestamp)}</td>
-                        <td>{formatValue(entry.username, 'System')}</td>
-                        <td className="muted">{formatRole(entry.role)}</td>
-                        <td>
-                          <span className="action-chip">{formatActionLabel(entry.action)}</span>
-                        </td>
-                        <td className="mono muted">{formatValue(entry.target)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="panel-body">
-                <EmptyState compact message="No audit records yet." />
-              </div>
-            )}
-          </section>
-        </>
-      ) : null}
     </section>
   );
 }

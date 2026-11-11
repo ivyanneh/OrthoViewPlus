@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client.js';
-import { StatusBadge } from '../components/StatusBadge.jsx';
+
 import { DashboardIcon, CalendarIcon, AlertIcon, CheckIcon } from '../components/Icons.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -53,28 +53,28 @@ export default function PractitionerDashboard() {
       </div>
 
       <div className="metric-cards">
-        <div className="metric-card" onClick={() => /* open today's appointments modal */}>
+        <div className="metric-card">
           <div className="metric-icon"><DashboardIcon size={24} /></div>
           <div className="metric-info">
             <div className="metric-title">Today's Appointments</div>
             <div className="metric-count">{appointmentsToday.length}</div>
           </div>
         </div>
-        <div className="metric-card" onClick={() => /* open pending requests modal */}>
+        <div className="metric-card">
           <div className="metric-icon"><CalendarIcon size={24} /></div>
           <div className="metric-info">
             <div className="metric-title">Pending Requests</div>
             <div className="metric-count">{pendingRequests.length}</div>
           </div>
         </div>
-        <div className="metric-card" onClick={() => /* open reports modal */}>
+        <div className="metric-card">
           <div className="metric-icon"><AlertIcon size={24} /></div>
           <div className="metric-info">
             <div className="metric-title">Reports Ready to View</div>
             <div className="metric-count">{reportsReady.length}</div>
           </div>
         </div>
-        <div className="metric-card" onClick={() => /* open STAT notifications modal */}>
+        <div className="metric-card">
           <div className="metric-icon"><CheckIcon size={24} /></div>
           <div className="metric-info">
             <div className="metric-title">STAT Notifications</div>
@@ -90,7 +90,7 @@ export default function PractitionerDashboard() {
             <ul>
               {appointmentsToday.map((appt) => (
                 <li key={appt.id}>
-                  <span>{appt.time} · {appt.patientName}</span>
+                  <span>{appt.time} Â· {appt.patientName}</span>
                   <span className="badge">{appt.status}</span>
                   <button>View Scan</button>
                 </li>
@@ -118,7 +118,7 @@ export default function PractitionerDashboard() {
             <ul>
               {reportsReady.map((report) => (
                 <li key={report.id}>
-                  <span>{report.mrn} · {report.studyType}</span>
+                  <span>{report.mrn} Â· {report.studyType}</span>
                   <button>View Report</button>
                 </li>
               ))}

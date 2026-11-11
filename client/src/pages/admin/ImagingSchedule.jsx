@@ -38,14 +38,14 @@ function ScheduleForm({ entry, practitioners, onClose, onSaved }) {
     event.preventDefault();
     const today = todayLocal();
 
-if (!form.date || form.date < today) {
-  setError(
-    !form.date
-      ? 'Enter a valid examination date.'
-      : 'Examination date cannot be in the past.',
-  );
-  return;
-}
+    if (!form.date || form.date < today) {
+      setError(
+        !form.date
+          ? 'Enter a valid examination date.'
+          : 'Examination date cannot be in the past.',
+      );
+      return;
+    }
     if (!form.examination.trim()) {
       setError('Examination description is required.');
       return;
@@ -204,6 +204,7 @@ export default function ImagingSchedule() {
         </div>
       ) : null}
 
+      {/* SUMMARY STRIP WITH FIXED HIGH-CONTRAST NUMBERS */}
       <div className="summary-strip clickable">
         {summaryItems.map((item) => (
           <button
@@ -213,7 +214,9 @@ export default function ImagingSchedule() {
             onClick={() => setStatus(status === item.key ? 'all' : item.key)}
           >
             <span>{item.label}</span>
-            <strong>{counts[item.key]}</strong>
+            <strong style={{ color: 'var(--text-primary, #0f172a)', fontSize: '1.75rem', fontWeight: 700 }}>
+              {counts[item.key]}
+            </strong>
           </button>
         ))}
       </div>
