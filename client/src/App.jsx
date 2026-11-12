@@ -1,4 +1,3 @@
-
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import Layout from './components/Layout.jsx';
@@ -105,9 +104,10 @@ const adminPages = [
   ['/admin/modalities', <ModalityMonitoring />],
   ['/admin/system', <SystemAdministration />],
   ['/admin/profile', <AdminProfile />],
-  ['/admin/imaging-studies', <ImagingStudyManagement />],
-  ['/admin/patient-mapping', <ImagingStudyManagement />],
-  ['/admin/study-linking', <ImagingStudyManagement />],
+  ['/admin/settings', <AdminProfile />],
+  ['/admin/imaging-studies', <ImagingStudyManagement mode="all" />],
+  ['/admin/patient-mapping', <ImagingStudyManagement mode="mapping" />],
+  ['/admin/study-linking', <ImagingStudyManagement mode="linking" />],
 ];
 
 export default function App() {

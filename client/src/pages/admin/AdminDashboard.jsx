@@ -38,7 +38,7 @@ export default function AdminDashboard() {
 
   function handleOpenAuditLogs(e) {
     e.preventDefault();
-    navigate('/admin/audit');
+    navigate('/admin/audit-logs');
   }
 
   return (

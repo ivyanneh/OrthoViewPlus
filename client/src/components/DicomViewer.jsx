@@ -5,6 +5,7 @@ import { formatDicomDate, formatValue } from '../utils/format.js';
 
 export default function DicomViewer({ study, profile, seriesId, onSeriesChange }) {
   const series = profile?.series || [];
+  const [internalSeriesId, setInternalSeriesId] = useState('');
   const [instanceIndex, setInstanceIndex] = useState(0);
   const [imageUrl, setImageUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -17,19 +18,24 @@ export default function DicomViewer({ study, profile, seriesId, onSeriesChange }
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const drag = useRef(null);
 
+  const activeSeriesId = seriesId || internalSeriesId;
+
   const selectedSeries = useMemo(
-    () => series.find((item) => item.id === seriesId) || series[0] || null,
-    [series, seriesId],
+    () => series.find((item) => item.id === activeSeriesId) || series[0] || null,
+    [series, activeSeriesId],
   );
   const instanceIds = selectedSeries?.instances || [];
   const instanceId = instanceIds[instanceIndex] || null;
 
   useEffect(() => {
-    if (series.length && !series.some((item) => item.id === seriesId)) {
-      onSeriesChange(series[0].id);
+    if (series.length && !series.some((item) => item.id === activeSeriesId)) {
+      if (typeof onSeriesChange === 'function') {
+        onSeriesChange(series[0].id);
+      }
+      setInternalSeriesId(series[0].id);
       setInstanceIndex(0);
     }
-  }, [series, seriesId, onSeriesChange]);
+  }, [series, activeSeriesId, onSeriesChange]);
 
   useEffect(() => {
     if (!instanceId) {
@@ -94,7 +100,7 @@ export default function DicomViewer({ study, profile, seriesId, onSeriesChange }
       <div className="panel-header">
         <div>
           <h3>DICOM viewer</h3>
-          <p>{formatValue(study?.patientMrn)} · {formatValue(study?.studyDescription)} · {formatDicomDate(study?.studyDate)} · {formatValue(study?.modalitiesInStudy || selectedSeries?.modality)} · {formatValue(study?.studyStatus)}</p>
+          <p>{formatValue(study?.patientMrn || study?.mrn)} · {formatValue(study?.studyDescription || study?.description)} · {formatDicomDate(study?.studyDate || study?.study_date)} · {formatValue(study?.modalitiesInStudy || study?.modality || selectedSeries?.modality)} · {formatValue(study?.studyStatus || study?.status)}</p>
         </div>
         <span className="viewer-slice-count">{instanceIds.length ? `${instanceIndex + 1} / ${instanceIds.length}` : 'No instances'}</span>
       </div>
@@ -103,12 +109,15 @@ export default function DicomViewer({ study, profile, seriesId, onSeriesChange }
         <label>
           Series
           <select value={selectedSeries?.id || ''} onChange={(event) => {
-            onSeriesChange(event.target.value);
+            if (typeof onSeriesChange === 'function') {
+              onSeriesChange(event.target.value);
+            }
+            setInternalSeriesId(event.target.value);
             setInstanceIndex(0);
           }}>
             {series.map((item, index) => (
               <option key={item.id} value={item.id}>
-                {item.modality || 'Series'} {item.seriesNumber ? `#${item.seriesNumber}` : index + 1} · {item.instances.length} images
+                {item.modality || 'Series'} {item.seriesNumber ? `#${item.seriesNumber}` : index + 1} · {(item.instances || []).length} images
               </option>
             ))}
           </select>

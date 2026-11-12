@@ -1,182 +1,626 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
+import DicomViewer from '../components/DicomViewer.jsx';
 import EmptyState from '../components/EmptyState.jsx';
 import ErrorMessage from '../components/ErrorMessage.jsx';
 import LoadingState from '../components/LoadingState.jsx';
+import Modal from '../components/Modal.jsx';
 import { getApiError } from '../utils/format.js';
 
-export default function ImagingRequests() {
+function normalizePatient(raw, fallback = {}) {
+  if (!raw && !fallback) return null;
+  const src = raw || fallback;
+  return {
+    ...src,
+    id: src.id ?? fallback.patientId ?? fallback.patient_id,
+    mrn: src.mrn ?? fallback.mrn ?? fallback.patient_mrn ?? 'N/A',
+    first_name: src.first_name ?? src.firstName ?? fallback.firstName ?? fallback.patient_first_name ?? 'Patient',
+    last_name: src.last_name ?? src.lastName ?? fallback.lastName ?? fallback.patient_last_name ?? '',
+    date_of_birth: src.date_of_birth ?? src.dateOfBirth ?? null,
+    sex: src.sex ?? null,
+  };
+}
+
+export default function ScansImaging() {
   const { user } = useAuth();
-  const navigate = useNavigate();
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const location = useLocation();
+  const isRadiologist = user?.role === 'radiologist';
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchType, setSearchType] = useState('patientId');
+  const [searchResults, setSearchResults] = useState([]);
+  const [selectedPatient, setSelectedPatient] = useState(null);
+  const [selectedStudy, setSelectedStudy] = useState(null);
+  const [studyProfile, setStudyProfile] = useState(null);
+  const [patientHistory, setPatientHistory] = useState(null);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [assignedRequests, setAssignedRequests] = useState([]);
+  const [selectedRequest, setSelectedRequest] = useState(null);
 
   useEffect(() => {
-    loadRequests();
-  }, []);
+    const state = location.state;
+    if (state?.preSelectedPatientId) {
+      loadPreSelectedStudy(state);
+    }
+  }, [location.state]);
 
-  async function loadRequests() {
+  async function loadPreSelectedStudy(state) {
     setError('');
     setLoading(true);
     try {
-      const response = await api.get('/clinical/requests', {
-        params: { assignedRadiologistId: user?.id },
+      const historyResponse = await api.get(`/clinical/patients/${state.preSelectedPatientId}`, {
+        params: state.preSelectedRequestId ? { requestId: state.preSelectedRequestId } : {},
       });
-      const fetched = response.data?.requests || response.data || [];
-      setRequests(Array.isArray(fetched) ? fetched : []);
+      const patient = normalizePatient(historyResponse.data?.patient, {
+        id: state.preSelectedPatientId,
+      });
+      const studies = historyResponse.data?.history?.studies || [];
+
+      setSelectedPatient(patient);
+      setPatientHistory(historyResponse.data);
+
+      const study =
+        studies.find((s) => Number(s.id) === Number(state.preSelectedStudyId)) ||
+        studies.find(
+          (s) =>
+            (s.orthanc_study_id || s.orthancStudyId) === state.preSelectedOrthancStudyId,
+        ) ||
+        studies[0];
+
+      if (study) {
+        setSelectedStudy(study);
+        const orthancStudyId =
+          study.orthanc_study_id || study.orthancStudyId || state.preSelectedOrthancStudyId;
+        if (orthancStudyId) {
+          const profileResponse = await api.get(
+            `/imaging/studies/${encodeURIComponent(orthancStudyId)}`,
+          );
+          setStudyProfile(profileResponse.data);
+        } else {
+          setError('The linked study record does not have an Orthanc study ID.');
+        }
+      } else if (state.preSelectedOrthancStudyId) {
+        const fallbackStudy = {
+          id: state.preSelectedStudyId || state.preSelectedOrthancStudyId,
+          orthanc_study_id: state.preSelectedOrthancStudyId,
+        };
+        setSelectedStudy(fallbackStudy);
+        const profileResponse = await api.get(
+          `/imaging/studies/${encodeURIComponent(state.preSelectedOrthancStudyId)}`,
+        );
+        setStudyProfile(profileResponse.data);
+      } else {
+        setError('No linked imaging study was found for this request.');
+      }
     } catch (err) {
-      setError(getApiError(err, 'Unable to load imaging requests.'));
+      setError(getApiError(err, 'Unable to load the selected study.'));
     } finally {
       setLoading(false);
     }
   }
 
-  async function claimRequest(requestId) {
-    try {
-      await api.post(`/clinical/requests/${requestId}/assign`);
-      await loadRequests();
-    } catch (err) {
-      setError(getApiError(err, 'Unable to claim this request.'));
-    }
-  }
+  useEffect(() => {
+    if (!isRadiologist) return undefined;
 
-  async function handleOpenStudy(request) {
-    // First, check if the request has a linked study
-    try {
-      // Load the patient's studies to find the linked one
-      const patientId = request.patient_id || request.patientId;
-      if (!patientId) {
-        setError('Request does not have a valid patient ID.');
-        return;
-      }
+    let cancelled = false;
 
-      const historyResponse = await api.get(`/clinical/patients/${patientId}`, {
-        params: { requestId: request.id }
-      });
-      const studies = historyResponse.data?.history?.studies || [];
+    async function loadAssignedRequests() {
+      setLoading(true);
+      setError('');
 
-      // Find the study linked to this request
-      const linkedStudy = studies.find(
-        s => s.imaging_request_id === request.id || s.imagingRequestId === request.id
-      );
+      try {
+        const response = await api.get('/clinical/requests', {
+          params: { mine: 'true' },
+        });
 
-      if (!linkedStudy) {
-        setError('No imaging study is linked to this request. Please contact an administrator to link a study.');
-        return;
-      }
-
-      if (!linkedStudy.orthanc_study_id && !linkedStudy.orthancStudyId) {
-        setError('The linked study does not have an Orthanc study ID. Please contact an administrator.');
-        return;
-      }
-
-      // Navigate to Scans & Imaging with the study information
-      navigate('/scans', {
-        state: {
-          preSelectedPatientId: patientId,
-          preSelectedStudyId: linkedStudy.id,
-          preSelectedRequestId: linkedStudy.imagingRequestId,
-          preSelectedOrthancStudyId: linkedStudy.orthanc_study_id || linkedStudy.orthancStudyId
+        if (!cancelled) {
+          setAssignedRequests(response.data.requests || []);
         }
+      } catch (err) {
+        if (!cancelled) {
+          setError(getApiError(err, 'Unable to load your assigned imaging requests.'));
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadAssignedRequests();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isRadiologist]);
+
+  async function handleSearch() {
+    if (!searchQuery.trim()) return;
+
+    setError('');
+    setLoading(true);
+    try {
+      const response = await api.get('/clinical/patients', {
+        params: {
+          q: searchQuery,
+          limit: 20,
+        },
       });
+      setSearchResults(response.data.patients || []);
     } catch (err) {
-      setError(getApiError(err, 'Unable to open the study. Please try again.'));
+      setError(getApiError(err, 'Unable to search for patients.'));
+    } finally {
+      setLoading(false);
     }
   }
 
-  function getPatientName(request) {
-    const first = request.patient_first_name || request.firstName || request.patientName || '';
-    const last = request.patient_last_name || request.lastName || '';
-    const combined = `${first} ${last}`.trim();
-    return combined || `Patient #${request.patient_mrn || request.mrn || request.id}`;
+  async function selectPatient(patient) {
+    setSelectedPatient(normalizePatient(patient));
+    setSelectedStudy(null);
+    setStudyProfile(null);
+    setError('');
+
+    try {
+      const historyResponse = await api.get(`/clinical/patients/${patient.id}`);
+      setPatientHistory(historyResponse.data);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load patient history.'));
+    }
   }
 
-  if (loading) return <LoadingState message="Loading imaging requests..." />;
+  async function selectAssignedRequest(request) {
+    const assignedId = request.assigned_radiologist_id ?? request.assignedRadiologistId;
+    if (assignedId && Number(assignedId) !== Number(user?.id)) {
+      setError('This request is not assigned to your account.');
+      return;
+    }
+
+    const patientId = request.patient_id ?? request.patientId;
+    if (!patientId) {
+      setError('This imaging request does not have an associated patient record.');
+      return;
+    }
+
+    setError('');
+    setLoading(true);
+    setSelectedStudy(null);
+    setStudyProfile(null);
+    setPatientHistory(null);
+    setSelectedRequest(request);
+    setSelectedPatient(normalizePatient(null, request));
+
+    try {
+      const response = await api.get(`/clinical/patients/${patientId}`, {
+        params: { requestId: request.id },
+      });
+
+      setPatientHistory(response.data);
+      const normalized = normalizePatient(response.data?.patient, request);
+      setSelectedPatient(normalized);
+
+      const studies = response.data?.history?.studies || [];
+      const linkedStudy =
+        studies.find(
+          (s) => Number(s.imaging_request_id ?? s.imagingRequestId) === Number(request.id),
+        ) || studies[0];
+
+      if (linkedStudy) {
+        setSelectedStudy(linkedStudy);
+        const orthancStudyId = linkedStudy.orthanc_study_id || linkedStudy.orthancStudyId;
+        if (orthancStudyId) {
+          const profileResponse = await api.get(
+            `/imaging/studies/${encodeURIComponent(orthancStudyId)}`,
+          );
+          setStudyProfile(profileResponse.data);
+        } else {
+          setError('The linked study does not have an Orthanc study ID.');
+        }
+      }
+    } catch (err) {
+      setError(getApiError(err, 'Unable to open the assigned request.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function selectStudy(study) {
+    setSelectedStudy(study);
+    setError('');
+    setLoading(true);
+
+    try {
+      const orthancStudyId = study.orthanc_study_id || study.orthancStudyId;
+      if (!orthancStudyId) {
+        setError('This study does not have an Orthanc study ID.');
+        return;
+      }
+      const response = await api.get(`/imaging/studies/${encodeURIComponent(orthancStudyId)}`);
+      setStudyProfile(response.data);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load study details.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleNewSearch() {
+    setSelectedRequest(null);
+    setSelectedPatient(null);
+    setSelectedStudy(null);
+    setStudyProfile(null);
+    setPatientHistory(null);
+    setSearchResults([]);
+    setSearchQuery('');
+    setError('');
+  }
+
+  if (isRadiologist && !selectedPatient) {
+    return (
+      <section className="page">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Assigned Imaging Requests</h3>
+          </div>
+
+          <p className="muted">
+            Open an imaging request assigned to your account to view its patient history and linked studies.
+          </p>
+
+          {error ? <ErrorMessage message={error} /> : null}
+
+          {loading ? (
+            <LoadingState message="Loading assigned imaging requests..." />
+          ) : assignedRequests.length === 0 ? (
+            <EmptyState
+              title="No assigned imaging requests"
+              message="Requests assigned to your account will appear here. Claim available requests from your Radiologist dashboard."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Patient</th>
+                    <th>MRN</th>
+                    <th>Examination</th>
+                    <th>Modality</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {assignedRequests.map((request) => (
+                    <tr key={request.id}>
+                      <td>
+                        {request.lastName || request.patient_last_name || ''},{' '}
+                        {request.firstName || request.patient_first_name || request.patientName || ''}
+                      </td>
+                      <td>{request.mrn || request.patient_mrn || 'N/A'}</td>
+                      <td>{request.examination}</td>
+                      <td>{request.modality}</td>
+                      <td>{request.priority}</td>
+                      <td>{request.status}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={loading}
+                          onClick={() => selectAssignedRequest(request)}
+                        >
+                          Open Request
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  if (!selectedPatient) {
+    return (
+      <section className="page">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Search for Patient</h3>
+          </div>
+          <div className="filter-bar">
+            <div className="field inline-field grow">
+              <label htmlFor="search-type">Search by</label>
+              <select
+                id="search-type"
+                value={searchType}
+                onChange={(e) => setSearchType(e.target.value)}
+              >
+                <option value="patientId">Patient ID</option>
+                <option value="patientName">Patient Name</option>
+              </select>
+            </div>
+            <div className="field inline-field grow">
+              <label htmlFor="search-query">Search</label>
+              <input
+                id="search-query"
+                type="text"
+                placeholder={searchType === 'patientId' ? 'Enter patient ID' : 'Enter patient name'}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              />
+            </div>
+            <button type="button" className="primary-button" onClick={handleSearch} disabled={loading}>
+              {loading ? 'Searching...' : 'Search'}
+            </button>
+          </div>
+          {error ? <ErrorMessage message={error} /> : null}
+          {searchResults.length > 0 ? (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Patient ID</th>
+                    <th>Name</th>
+                    <th>Date of Birth</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {searchResults.map((patient) => (
+                    <tr key={patient.id}>
+                      <td>{patient.mrn}</td>
+                      <td>
+                        {patient.first_name || patient.firstName} {patient.last_name || patient.lastName}
+                      </td>
+                      <td>{patient.date_of_birth || patient.dateOfBirth || 'N/A'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => selectPatient(patient)}
+                        >
+                          Select
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              title="Enter patient search criteria"
+              message="Search by patient ID or name to access imaging studies."
+            />
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  if (!selectedStudy) {
+    const studies = patientHistory?.history?.studies || [];
+
+    return (
+      <section className="page">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h3>Patient Studies</h3>
+              <p>
+                {selectedPatient.first_name} {selectedPatient.last_name} · MRN {selectedPatient.mrn}
+              </p>
+            </div>
+            <button type="button" className="secondary-button" onClick={handleNewSearch}>
+              {isRadiologist ? 'Back to Assigned Requests' : 'Search Another Patient'}
+            </button>
+          </div>
+          {error ? <ErrorMessage message={error} /> : null}
+          {loading ? (
+            <LoadingState message="Loading linked studies..." />
+          ) : studies.length === 0 ? (
+            <EmptyState
+              title="No imaging studies found"
+              message="This patient has no linked imaging studies available yet. An administrator must link an Orthanc study to this request."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Study Date</th>
+                    <th>Modality</th>
+                    <th>Description</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studies.map((study) => (
+                    <tr key={study.id}>
+                      <td>{study.study_date || study.studyDate || 'N/A'}</td>
+                      <td>{study.modality || 'N/A'}</td>
+                      <td>{study.description || 'N/A'}</td>
+                      <td>{study.source || study.type || 'original'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => selectStudy(study)}
+                        >
+                          Open Study
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="page">
       <div className="panel">
         <div className="panel-header">
-          <h3>Imaging Requests</h3>
-        </div>
-        {error ? <ErrorMessage message={error} /> : null}
-        {requests.length === 0 ? (
-          <EmptyState
-            title="No imaging requests"
-            message="You have no assigned imaging requests at this time."
-          />
-        ) : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Patient</th>
-                  <th>MRN</th>
-                  <th>Examination</th>
-                  <th>Modality</th>
-                  <th>Priority</th>
-                  <th>Request Date</th>
-                  <th>Status</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {requests.map((request) => (
-                  <tr key={request.id}>
-                    <td>{getPatientName(request)}</td>
-                    <td>{request.patient_mrn || request.mrn || 'N/A'}</td>
-                    <td>{request.examination || 'Imaging Study'}</td>
-                    <td>
-                      <span className="badge badge-neutral">{request.modality || 'DX'}</span>
-                    </td>
-                    <td>
-                      <span
-                        className={`badge ${
-                          ['urgent', 'stat'].includes(String(request.priority).toLowerCase())
-                            ? 'badge-danger'
-                            : 'badge-neutral'
-                        }`}
-                      >
-                        {request.priority || 'routine'}
-                      </span>
-                    </td>
-                    <td>
-                      {request.created_at
-                        ? new Date(request.created_at).toLocaleDateString()
-                        : new Date().toLocaleDateString()}
-                    </td>
-                    <td>
-                      <span className="badge badge-ok">{request.status}</span>
-                    </td>
-                    <td>
-                      {request.status === 'submitted' ? (
-                        <button
-                          type="button"
-                          className="primary-button"
-                          onClick={() => claimRequest(request.id)}
-                        >
-                          Claim
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="primary-button"
-                          onClick={() => handleOpenStudy(request)}
-                        >
-                          Open Study
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div>
+            <h3>Imaging Workspace</h3>
+            <p>
+              {selectedPatient.first_name} {selectedPatient.last_name} · MRN {selectedPatient.mrn}
+            </p>
           </div>
-        )}
+          <div className="button-row">
+            <button type="button" className="secondary-button" onClick={handleNewSearch}>
+              {isRadiologist ? 'Back to Assigned Requests' : 'Search Another Patient'}
+            </button>
+          </div>
+        </div>
+
+        {error ? <ErrorMessage message={error} /> : null}
+        {loading ? <LoadingState message="Loading study..." /> : null}
+
+        {!loading && !studyProfile && !error ? (
+          <EmptyState
+            title="Study viewer unavailable"
+            message="The Orthanc DICOM profile could not be retrieved for this study."
+          />
+        ) : null}
+
+        {studyProfile ? (
+          <>
+            <DicomViewer study={selectedStudy} profile={studyProfile} />
+            <div className="panel">
+              <div className="panel-header">
+                <h3>Patient Information</h3>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setShowHistoryModal(true)}
+                >
+                  View Patient History
+                </button>
+              </div>
+              <div className="panel-body">
+                <div className="detail-grid">
+                  <div>
+                    <dt>Patient Name</dt>
+                    <dd>
+                      {selectedPatient.first_name} {selectedPatient.last_name}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Patient ID</dt>
+                    <dd>{selectedPatient.mrn}</dd>
+                  </div>
+                  <div>
+                    <dt>Date of Birth</dt>
+                    <dd>{selectedPatient.date_of_birth || 'N/A'}</dd>
+                  </div>
+                  <div>
+                    <dt>Sex</dt>
+                    <dd>{selectedPatient.sex || 'N/A'}</dd>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="panel">
+              <div className="panel-header">
+                <h3>Exposure Index &amp; Image Quality</h3>
+              </div>
+              <div className="panel-body">
+                <div className="detail-grid">
+                  <div>
+                    <dt>Exposure Index (EI)</dt>
+                    <dd>{studyProfile.study?.exposureIndex || 'Unavailable'}</dd>
+                  </div>
+                  <div>
+                    <dt>Target EI</dt>
+                    <dd>{studyProfile.study?.targetEI || 'Unavailable'}</dd>
+                  </div>
+                  <div>
+                    <dt>Deviation Index (DI)</dt>
+                    <dd>{studyProfile.study?.deviationIndex || 'Unavailable'}</dd>
+                  </div>
+                  <div>
+                    <dt>Exposure Status</dt>
+                    <dd>{studyProfile.study?.exposureStatus || 'Unavailable'}</dd>
+                  </div>
+                </div>
+                <p className="field-hint" style={{ marginTop: '1rem' }}>
+                  EI measures detector exposure, not actual absorbed patient dose. Acceptable EI values do not guarantee image diagnostic adequacy.
+                </p>
+              </div>
+            </div>
+          </>
+        ) : null}
       </div>
+
+      {showHistoryModal && patientHistory ? (
+        <Modal onClose={() => setShowHistoryModal(false)} title="Patient History">
+          <div className="modal-body">
+            <h4>Patient Information</h4>
+            <div className="detail-grid">
+              <div>
+                <dt>Name</dt>
+                <dd>
+                  {selectedPatient.first_name} {selectedPatient.last_name}
+                </dd>
+              </div>
+              <div>
+                <dt>MRN</dt>
+                <dd>{selectedPatient.mrn}</dd>
+              </div>
+              <div>
+                <dt>Date of Birth</dt>
+                <dd>{selectedPatient.date_of_birth || 'N/A'}</dd>
+              </div>
+            </div>
+
+            <h4 style={{ marginTop: '1.5rem' }}>Medical History</h4>
+            <p>{patientHistory.patient?.notes || 'No medical history available.'}</p>
+
+            <h4 style={{ marginTop: '1.5rem' }}>Previous Imaging Examinations</h4>
+            {patientHistory.history?.studies?.length > 0 ? (
+              <table className="data-table compact-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Modality</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {patientHistory.history.studies.map((study) => (
+                    <tr key={study.id}>
+                      <td>{study.study_date || study.studyDate || 'N/A'}</td>
+                      <td>{study.modality || 'N/A'}</td>
+                      <td>{study.description || 'N/A'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="muted">No previous imaging examinations found.</p>
+            )}
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setShowHistoryModal(false)}
+            >
+              Close
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   );
 }

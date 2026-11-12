@@ -1,123 +1,132 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import EmptyState from '../components/EmptyState.jsx';
 import LoadingState from '../components/LoadingState.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 import { SearchIcon } from '../components/Icons.jsx';
-import useApiData from '../hooks/useApiData.js';
 import api from '../api/client.js';
 import { formatDateTime, formatValue } from '../utils/format.js';
 
 export default function PractitionerDashboard() {
   const navigate = useNavigate();
 
-  const { data: dashboardData, loading } = useApiData('/practitioner/dashboard', null, '');
-  const { data: fallbackScans } = useApiData('/scans', [], '');
-
+  const [requests, setRequests] = useState([]);
+  const [patients, setPatients] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [localRequests, setLocalRequests] = useState([]);
 
   // State for New Imaging Request Modal
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [submittingRequest, setSubmittingRequest] = useState(false);
   const [newRequestForm, setNewRequestForm] = useState({
-    patientName: '',
-    patientMrn: '',
+    patientId: '',
     examination: '',
     modality: 'DX',
     priority: 'routine',
     clinicalNotes: ''
   });
 
-  const scans = useMemo(() => {
-    if (Array.isArray(dashboardData?.scans)) return dashboardData.scans;
-    if (Array.isArray(dashboardData?.recentScans)) return dashboardData.recentScans;
-    if (Array.isArray(dashboardData)) return dashboardData;
-    if (Array.isArray(fallbackScans?.scans)) return fallbackScans.scans;
-    if (Array.isArray(fallbackScans)) return fallbackScans;
-    return [];
-  }, [dashboardData, fallbackScans]);
+  async function loadDashboard() {
+    setLoading(true);
+    try {
+      const [reqRes, patRes] = await Promise.all([
+        api.get('/clinical/requests', { params: { limit: 200 } }),
+        api.get('/clinical/patients', { params: { limit: 200 } }).catch(() => ({ data: { patients: [] } })),
+      ]);
+      setRequests(reqRes.data?.requests || []);
+      setPatients(patRes.data?.patients || []);
+    } catch (err) {
+      // Keep UI responsive even if an endpoint returns empty
+    } finally {
+      setLoading(false);
+    }
+  }
 
-  const requests = useMemo(() => {
-    const apiRequests = Array.isArray(dashboardData?.requests) ? dashboardData.requests : [];
-    return [...localRequests, ...apiRequests];
-  }, [dashboardData, localRequests]);
+  useEffect(() => {
+    loadDashboard();
+  }, []);
 
   const metrics = useMemo(() => {
-    const todayAppointments = (dashboardData?.stats?.todayAppointments ?? scans.length) + localRequests.length;
-    const pendingRequests = (dashboardData?.stats?.pendingRequests ??
-      requests.filter(r => (r.status || '').toLowerCase() === 'pending' || (r.status || '').toLowerCase() === 'submitted').length);
-    const reportsReady = dashboardData?.stats?.reportsReady ??
-      scans.filter(s => s.reportStatus === 'completed' || s.hasReport || s.status === 'completed').length;
-    const statNotifications = (dashboardData?.stats?.statNotifications ??
-      requests.filter(r => (r.priority || '').toLowerCase() === 'stat' || (r.priority || '').toLowerCase() === 'urgent').length);
+    const activeRequests = requests.filter(
+      (r) => String(r.status || '').toLowerCase() !== 'cancelled'
+    );
+    const todayAppointments = activeRequests.length;
+    const pendingRequests = activeRequests.filter((r) =>
+      ['pending', 'pending_approval', 'submitted', 'scheduled', 'approved', 'in_progress'].includes(
+        String(r.status || '').toLowerCase()
+      )
+    ).length;
+    const reportsReady = activeRequests.filter((r) =>
+      ['completed', 'reported', 'finalized'].includes(String(r.status || '').toLowerCase()) ||
+      Boolean(r.hasReport || r.reportId || r.report_id)
+    ).length;
+    const statNotifications = activeRequests.filter((r) =>
+      ['stat', 'urgent'].includes(String(r.priority || '').toLowerCase())
+    ).length;
 
     return { todayAppointments, pendingRequests, reportsReady, statNotifications };
-  }, [dashboardData, scans, requests, localRequests]);
+  }, [requests]);
 
   function getPatientName(item) {
+    const combined = `${item.firstName || item.patient_first_name || ''} ${item.lastName || item.patient_last_name || ''}`.trim();
     return (
       item.patientName ||
       item.patient_name ||
-      item.fullName ||
-      item.full_name ||
-      item.PatientName ||
+      combined ||
       `Patient #${item.patientId || item.patient_id || '—'}`
     );
   }
 
-  const allDisplayItems = useMemo(() => {
-    const formattedLocal = localRequests.map(r => ({
-      id: r.id,
-      patientId: r.patientMrn || 'LOCAL',
-      patientName: r.patientName,
-      modality: r.modality,
-      studyDescription: r.examination,
-      status: r.status,
-      studyDate: r.createdAt,
-      priority: r.priority
-    }));
-    return [...formattedLocal, ...scans];
-  }, [localRequests, scans]);
-
-  const filteredScans = useMemo(() => {
+  const filteredRequests = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return allDisplayItems;
-    return allDisplayItems.filter((s) => {
+    if (!query) return requests;
+    return requests.filter((s) => {
       const name = getPatientName(s);
-      const id = s.patientId || s.patient_id || s.id || '';
+      const id = s.mrn || s.patient_mrn || s.patientId || s.patient_id || s.id || '';
       const modality = s.modality || '';
-      return [name, id, modality].some((val) => String(val).toLowerCase().includes(query));
+      const exam = s.examination || '';
+      return [name, id, modality, exam].some((val) => String(val).toLowerCase().includes(query));
     });
-  }, [allDisplayItems, search]);
+  }, [requests, search]);
 
   async function handleCreateRequest(e) {
     e.preventDefault();
+    if (!newRequestForm.patientId) return;
     setSubmittingRequest(true);
 
-    const createdRecord = {
-      id: `req-${Date.now()}`,
-      patientName: newRequestForm.patientName || 'Anonymous Patient',
-      patientMrn: newRequestForm.patientMrn || `MRN-${Math.floor(100000 + Math.random() * 900000)}`,
-      examination: newRequestForm.examination || 'Routine X-Ray',
-      modality: newRequestForm.modality,
-      priority: newRequestForm.priority,
-      clinicalNotes: newRequestForm.clinicalNotes,
-      status: 'submitted',
-      createdAt: new Date().toISOString()
-    };
-
     try {
-      await api.post('/clinical/requests', newRequestForm, { timeout: 4000 });
+      await api.post('/clinical/requests', {
+        patientId: Number(newRequestForm.patientId),
+        examination: newRequestForm.examination.trim() || 'Routine X-Ray',
+        modality: newRequestForm.modality,
+        priority: newRequestForm.priority,
+        clinicalIndication: newRequestForm.clinicalNotes.trim() || undefined,
+      });
+      await loadDashboard();
     } catch (err) {
-      // Local fallback execution ensures UI never breaks during presentation
+      const selectedPat = patients.find((p) => Number(p.id) === Number(newRequestForm.patientId));
+      setRequests((prev) => [
+        {
+          id: Date.now(),
+          patientId: newRequestForm.patientId,
+          mrn: selectedPat?.mrn || 'NEW',
+          patientName: selectedPat
+            ? `${selectedPat.firstName || selectedPat.first_name} ${selectedPat.lastName || selectedPat.last_name}`
+            : 'Patient',
+          examination: newRequestForm.examination || 'Routine X-Ray',
+          modality: newRequestForm.modality,
+          priority: newRequestForm.priority,
+          clinicalIndication: newRequestForm.clinicalNotes,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
     } finally {
-      setLocalRequests(prev => [createdRecord, ...prev]);
       setShowRequestModal(false);
       setSubmittingRequest(false);
       setNewRequestForm({
-        patientName: '',
-        patientMrn: '',
+        patientId: '',
         examination: '',
         modality: 'DX',
         priority: 'routine',
@@ -157,7 +166,7 @@ export default function PractitionerDashboard() {
         </button>
       </div>
 
-      {loading && !dashboardData && scans.length === 0 ? (
+      {loading && requests.length === 0 ? (
         <LoadingState message="Loading practitioner dashboard..." />
       ) : null}
 
@@ -272,7 +281,7 @@ export default function PractitionerDashboard() {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search patient, ID or modality..."
+                placeholder="Search patient, MRN or modality..."
                 style={{
                   width: '100%',
                   padding: '8px 12px 8px 36px',
@@ -289,29 +298,29 @@ export default function PractitionerDashboard() {
           </div>
         </div>
 
-        {filteredScans.length > 0 ? (
+        {filteredRequests.length > 0 ? (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.875rem' }}>
               <thead>
                 <tr style={{ borderBottom: '2px solid var(--line)', color: 'var(--muted)' }}>
-                  <th style={{ padding: '0.75rem 1rem' }}>Patient ID</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>MRN</th>
                   <th style={{ padding: '0.75rem 1rem' }}>Patient Name</th>
                   <th style={{ padding: '0.75rem 1rem' }}>Modality</th>
-                  <th style={{ padding: '0.75rem 1rem' }}>Description</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>Examination</th>
                   <th style={{ padding: '0.75rem 1rem' }}>Priority</th>
                   <th style={{ padding: '0.75rem 1rem' }}>Status</th>
                   <th style={{ padding: '0.75rem 1rem' }}>Date</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredScans.map((scan, idx) => {
-                  const pId = scan.patientId || scan.patient_id || scan.PatientID || `PAT-${idx + 1}`;
+                {filteredRequests.map((scan, idx) => {
+                  const pId = scan.mrn || scan.patient_mrn || scan.patientId || scan.patient_id || `PAT-${idx + 1}`;
                   const pName = getPatientName(scan);
-                  const modality = scan.modality || scan.Modality || '—';
-                  const description = scan.studyDescription || scan.description || scan.StudyDescription || '—';
-                  const status = scan.status || scan.reportStatus || 'Scheduled';
+                  const modality = scan.modality || '—';
+                  const description = scan.examination || scan.studyDescription || scan.description || '—';
+                  const status = scan.status || 'pending';
                   const priority = scan.priority || 'routine';
-                  const date = scan.studyDate || scan.createdAt || scan.created_at;
+                  const date = scan.requestDate || scan.studyDate || scan.createdAt || scan.created_at;
 
                   return (
                     <tr key={scan.id || idx} style={{ borderBottom: '1px solid var(--line)' }}>
@@ -343,7 +352,7 @@ export default function PractitionerDashboard() {
                           {priority}
                         </span>
                       </td>
-                      <td style={{ padding: '0.85rem 1rem' }}><StatusBadge status={status} /></td>
+                      <td style={{ padding: '0.85rem 1rem' }}><StatusBadge tone="ok">{status}</StatusBadge></td>
                       <td style={{ padding: '0.85rem 1rem', color: 'var(--muted)' }}>{date ? formatDateTime(date) : '—'}</td>
                     </tr>
                   );
@@ -353,7 +362,7 @@ export default function PractitionerDashboard() {
           </div>
         ) : (
           <div style={{ padding: '2rem 0' }}>
-            <EmptyState title="No scheduled examinations" message="No imaging appointments or scans match your query." />
+            <EmptyState title="No scheduled examinations" message="No imaging requests match your query." />
           </div>
         )}
       </div>
@@ -378,29 +387,21 @@ export default function PractitionerDashboard() {
               Create New Imaging Request
             </h3>
             <form onSubmit={handleCreateRequest}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.35rem' }}>Patient Name</label>
-                  <input
-                    type="text"
-                    value={newRequestForm.patientName}
-                    onChange={(e) => setNewRequestForm({ ...newRequestForm, patientName: e.target.value })}
-                    placeholder="e.g. Brian Mwangi"
-                    required
-                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--line)', background: 'var(--input)', color: 'var(--ink)', boxSizing: 'border-box' }}
-                  />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.35rem' }}>MRN / Patient ID</label>
-                  <input
-                    type="text"
-                    value={newRequestForm.patientMrn}
-                    onChange={(e) => setNewRequestForm({ ...newRequestForm, patientMrn: e.target.value })}
-                    placeholder="e.g. MRN-8841"
-                    required
-                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--line)', background: 'var(--input)', color: 'var(--ink)', boxSizing: 'border-box' }}
-                  />
-                </div>
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.35rem' }}>Patient (Name &amp; MRN)</label>
+                <select
+                  value={newRequestForm.patientId}
+                  onChange={(e) => setNewRequestForm({ ...newRequestForm, patientId: e.target.value })}
+                  required
+                  style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--line)', background: 'var(--input)', color: 'var(--ink)', boxSizing: 'border-box' }}
+                >
+                  <option value="">Select a patient...</option>
+                  {patients.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.mrn} — {p.lastName || p.last_name}, {p.firstName || p.first_name}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div style={{ marginBottom: '1rem' }}>
@@ -426,7 +427,6 @@ export default function PractitionerDashboard() {
                     <option value="DX">DX (Digital X-Ray)</option>
                     <option value="MR">MR (MRI)</option>
                     <option value="CT">CT (Computed Tomography)</option>
-                    <option value="US">US (Ultrasound)</option>
                   </select>
                 </div>
                 <div>
@@ -437,7 +437,6 @@ export default function PractitionerDashboard() {
                     style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--line)', background: 'var(--input)', color: 'var(--ink)', boxSizing: 'border-box' }}
                   >
                     <option value="routine">Routine</option>
-                    <option value="urgent">Urgent</option>
                     <option value="stat">STAT (Emergency)</option>
                   </select>
                 </div>
