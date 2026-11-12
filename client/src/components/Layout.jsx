@@ -1,10 +1,9 @@
-﻿
-import { useState, useEffect, useCallback } from 'react';
+﻿import { useState, useEffect, useCallback } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { formatRole, getInitials } from '../utils/format.js';
 import Sidebar from './Sidebar.jsx';
-import useTheme from '../hooks/useTheme.js';
+import useTheme from '../hooks/useTheme.jsx';
 
 const pageMeta = {
   '/dashboard': {
@@ -64,7 +63,12 @@ const pageMeta = {
     description: 'Manage your administrator profile, password and preferences.',
   },
 
-  // Radiologist workspace pages.
+  // Practitioner workspace pages
+  '/practitioner/dashboard': { title: 'Practitioner Dashboard', description: 'Scheduled imaging examinations, pending requests, and patient status.' },
+  '/practitioner/requests': { title: 'Imaging Requests', description: 'Create and track routine and STAT imaging requests.' },
+  '/practitioner/scans': { title: 'Scans & Reports', description: 'View imaging examinations and read diagnostic reports.' },
+
+  // Radiologist workspace pages
   '/scans': { title: 'Scans & Imaging', description: '' },
   '/ai-tools': { title: 'AI Imaging Tools', description: '' },
   '/ai-tools/restore': { title: 'Image Restoration', description: '' },
@@ -107,6 +111,10 @@ function sectionFor(pathname) {
     return 'Account';
   }
 
+  if (pathname.startsWith('/practitioner')) {
+    return 'Practitioner Workspace';
+  }
+
   return 'Clinical Workspace';
 }
 
@@ -122,8 +130,8 @@ export default function Layout() {
   const { pathname } = useLocation();
   const { user } = useAuth();
 
-  // Initialize and expose the shared theme state.
-  const { theme, setTheme } = useTheme();
+  // Extract both theme state and explicit toggle helper
+  const { theme, toggleTheme } = useTheme();
 
   const meta = pageMeta[pathname] ?? {
     title: 'OrthoView+',
@@ -132,13 +140,12 @@ export default function Layout() {
 
   const UserArea = user?.role === 'administrator' ? Link : 'div';
 
-
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${theme}`} data-theme={theme}>
       <Sidebar />
 
-      <div className="workspace">
-        <header className="topbar">
+      <div className="workspace" data-theme={theme}>
+        <header className="topbar" data-theme={theme}>
           <div className="topbar-title">
             <span className="topbar-crumb">
               {sectionFor(pathname)}
@@ -182,18 +189,27 @@ export default function Layout() {
               </UserArea>
             ) : null}
 
-            {/* Theme toggle for administrator workspace. */}
-            {user?.role === 'administrator' && (
-              <button
-                type="button"
-                className="topbar-theme-toggle"
-                title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-                aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-                aria-pressed={theme === 'dark'}
-                onClick={() =>
-                  setTheme(theme === 'light' ? 'dark' : 'light')
-                }
-              >
+            {/* Global Theme toggle button */}
+            <button
+              type="button"
+              className="topbar-theme-toggle"
+              title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+              aria-pressed={theme === 'dark'}
+              onClick={toggleTheme}
+              style={{
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '8px',
+                borderRadius: '8px',
+                border: '1px solid var(--line, #e2e8f0)',
+                background: 'var(--surface, #ffffff)',
+                color: 'var(--ink, #0f172a)'
+              }}
+            >
+              {theme === 'dark' ? (
                 <svg
                   width={20}
                   height={20}
@@ -206,7 +222,7 @@ export default function Layout() {
                   <circle cx="12" cy="12" r="5" />
                   <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
                 </svg>
-
+              ) : (
                 <svg
                   width={20}
                   height={20}
@@ -216,22 +232,18 @@ export default function Layout() {
                   strokeWidth="2"
                   className="theme-moon"
                   aria-hidden="true"
-                  style={{
-                    display: theme === 'dark' ? 'none' : 'block',
-                  }}
                 >
                   <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
                 </svg>
-              </button>
-            )}
+              )}
+            </button>
           </div>
         </header>
 
-        <main className="main">
+        <main className="main" data-theme={theme}>
           <Outlet />
         </main>
       </div>
     </div>
   );
 }
-

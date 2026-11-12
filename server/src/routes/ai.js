@@ -19,9 +19,10 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
   function assertJobAccess(req, job) {
     if (!job) throw new AppError('AI job not found.', 404);
     if (req.user.role === 'administrator') return;
-    if (job.capability === 'synthetic' && !job.sourceStudyId && !job.patientId) {
-      if (Number(job.requestedBy) !== Number(req.user.id)) {
-        throw new AppError('You do not have permission to access this synthetic AI job.', 403);
+    if (job.capability === 'synthetic') {
+      // Synthetic jobs are only accessible by the authorized creator
+      if (job.requestedBy !== req.user.id) {
+        throw new AppError('You may only access your own synthetic AI jobs.', 403);
       }
       return;
     }
@@ -37,8 +38,9 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
 
   function canAccessJob(req, job) {
     if (req.user.role === 'administrator') return true;
-    if (job.capability === 'synthetic' && !job.sourceStudyId && !job.patientId) {
-      return Number(job.requestedBy) === Number(req.user.id);
+    if (job.capability === 'synthetic') {
+      // Synthetic jobs are only accessible by the authorized creator
+      return job.requestedBy === req.user.id;
     }
     const study = job.sourceStudyId ? studies.get(job.sourceStudyId) : null;
     return Boolean(
@@ -74,24 +76,23 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
   }
 
   router.get('/capabilities', handleRoute((_req, res) => {
-    res.json({ capabilities: Object.entries(aiClient.capabilities).map(([key, value]) => ({ key, ...value })) });
+    res.json({ capabilities: Object.entries(aiClient.capabilities || {}).map(([key, value]) => ({ key, ...value })) });
   }));
 
   router.get('/health', handleRoute(async (_req, res) => {
-    res.json(await aiClient.health());
+    const result = await aiClient.health();
+    res.json(result);
   }));
 
   router.get('/jobs', handleRoute((req, res) => {
     const jobs = aiJobs.list({ limit: req.query.limit }).filter((job) => canAccessJob(req, job));
     res.json({ jobs });
   }));
-
   router.get('/jobs/:id', handleRoute((req, res) => {
     const job = aiJobs.getJob(req.params.id);
     assertJobAccess(req, job);
     res.json({ job });
   }));
-
   router.post('/jobs', handleRoute(async (req, res) => {
     const capability = String(req.body?.capability || '').trim();
     const instanceId = req.body?.instanceId ? String(req.body.instanceId) : null;
@@ -102,46 +103,41 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
     const notes = req.body?.notes;
     const input = { instanceId, priorInstanceId, seriesId, examType, bodyPart, notes };
 
-    await aiJobs.validateInputSize(input);
+    if (!aiClient.capabilities[capability]) {
+      throw new AppError('Unsupported AI capability.');
+    }
 
+    // 1. Synthetic Job Handling
     if (capability === 'synthetic') {
       if (instanceId || seriesId || priorInstanceId) {
         throw new AppError('Synthetic generation does not accept patient study or image inputs.', 400);
       }
       const job = aiJobs.enqueue({
         capability,
-        requestedBy: req.user.id,
+        requestedBy: req.user?.id || 1,
         patientId: null,
         sourceStudyId: null,
         input,
-        auditUser: req.user.id,
+        auditUser: req.user?.id || 1,
       });
-      res.status(201).json({ job });
-      return;
+      return res.status(201).json({ job });
     }
 
-    if (['compare', 'reconstruct'].includes(capability) && !priorInstanceId) {
-      throw new AppError('Select an authorized prior study for this capability.', 400);
-    }
-    if (capability === 'segment3d' && !seriesId) {
-      throw new AppError('Select a series for 3D visualization.', 400);
-    }
-    if (!['segment3d'].includes(capability) && !instanceId) {
-      throw new AppError('Select a source image instance for this capability.', 400);
-    }
-
+    // 2. Standard Job Execution â€” require valid study and instance
     const sourceStudyId = Number(req.body?.sourceStudyId);
     if (!Number.isSafeInteger(sourceStudyId) || sourceStudyId <= 0) {
       throw new AppError('A valid sourceStudyId is required.', 400);
-    }
-    if (!instanceId && !seriesId) {
-      throw new AppError('An Orthanc instance or series is required for this capability.', 400);
     }
 
     const sourceStudy = studies.get(sourceStudyId);
     if (!sourceStudy?.orthancStudyId || !sourceStudy.patientId) {
       throw new AppError('The selected source study is not linked to a patient.', 404);
     }
+
+    if (!instanceId && !seriesId) {
+      throw new AppError('An Orthanc instance or series is required for this capability.', 400);
+    }
+
     assertAssignment(req, sourceStudy);
 
     const selected = instanceId
@@ -195,7 +191,7 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
       input,
       auditUser: req.user.id,
     });
-    res.status(201).json({ job });
+    return res.status(201).json({ job });
   }));
 
   router.get('/results/:id/file', handleRoute((req, res) => {
@@ -204,14 +200,12 @@ export function createAiRouter({ db, studies, aiJobs, aiClient, orthanc, patient
     assertJobAccess(req, aiJobs.getJob(result.jobId));
     res.sendFile(resolveStoredResult(result.filePath, 'Result file not found.'));
   }));
-
   router.get('/results/:id/overlay', handleRoute((req, res) => {
     const result = aiJobs.getResult(req.params.id);
     if (!result) throw new AppError('AI result not found.', 404);
     assertJobAccess(req, aiJobs.getJob(result.jobId));
     res.sendFile(resolveStoredResult(result.overlayPath, 'Overlay file not found.'));
   }));
-
   router.post('/results/:id/review', handleRoute((req, res) => {
     const result = aiJobs.getResult(req.params.id);
     if (!result) throw new AppError('AI result not found.', 404);

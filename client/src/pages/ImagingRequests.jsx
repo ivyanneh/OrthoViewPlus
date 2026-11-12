@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
 import EmptyState from '../components/EmptyState.jsx';
@@ -8,6 +9,7 @@ import { getApiError } from '../utils/format.js';
 
 export default function ImagingRequests() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -21,11 +23,10 @@ export default function ImagingRequests() {
     setLoading(true);
     try {
       const response = await api.get('/clinical/requests', {
-        params: {
-          assignedRadiologistId: user?.id,
-        },
+        params: { assignedRadiologistId: user?.id },
       });
-      setRequests(response.data.requests || []);
+      const fetched = response.data?.requests || response.data || [];
+      setRequests(Array.isArray(fetched) ? fetched : []);
     } catch (err) {
       setError(getApiError(err, 'Unable to load imaging requests.'));
     } finally {
@@ -40,6 +41,57 @@ export default function ImagingRequests() {
     } catch (err) {
       setError(getApiError(err, 'Unable to claim this request.'));
     }
+  }
+
+  async function handleOpenStudy(request) {
+    // First, check if the request has a linked study
+    try {
+      // Load the patient's studies to find the linked one
+      const patientId = request.patient_id || request.patientId;
+      if (!patientId) {
+        setError('Request does not have a valid patient ID.');
+        return;
+      }
+
+      const historyResponse = await api.get(`/clinical/patients/${patientId}`, {
+        params: { requestId: request.id }
+      });
+      const studies = historyResponse.data?.history?.studies || [];
+
+      // Find the study linked to this request
+      const linkedStudy = studies.find(
+        s => s.imaging_request_id === request.id || s.imagingRequestId === request.id
+      );
+
+      if (!linkedStudy) {
+        setError('No imaging study is linked to this request. Please contact an administrator to link a study.');
+        return;
+      }
+
+      if (!linkedStudy.orthanc_study_id && !linkedStudy.orthancStudyId) {
+        setError('The linked study does not have an Orthanc study ID. Please contact an administrator.');
+        return;
+      }
+
+      // Navigate to Scans & Imaging with the study information
+      navigate('/scans', {
+        state: {
+          preSelectedPatientId: patientId,
+          preSelectedStudyId: linkedStudy.id,
+          preSelectedRequestId: linkedStudy.imagingRequestId,
+          preSelectedOrthancStudyId: linkedStudy.orthanc_study_id || linkedStudy.orthancStudyId
+        }
+      });
+    } catch (err) {
+      setError(getApiError(err, 'Unable to open the study. Please try again.'));
+    }
+  }
+
+  function getPatientName(request) {
+    const first = request.patient_first_name || request.firstName || request.patientName || '';
+    const last = request.patient_last_name || request.lastName || '';
+    const combined = `${first} ${last}`.trim();
+    return combined || `Patient #${request.patient_mrn || request.mrn || request.id}`;
   }
 
   if (loading) return <LoadingState message="Loading imaging requests..." />;
@@ -74,17 +126,31 @@ export default function ImagingRequests() {
               <tbody>
                 {requests.map((request) => (
                   <tr key={request.id}>
-                    <td>{request.patient_first_name} {request.patient_last_name}</td>
-                    <td>{request.patient_mrn || 'N/A'}</td>
-                    <td>{request.examination}</td>
-                    <td>{request.modality}</td>
+                    <td>{getPatientName(request)}</td>
+                    <td>{request.patient_mrn || request.mrn || 'N/A'}</td>
+                    <td>{request.examination || 'Imaging Study'}</td>
                     <td>
-                      <span className={`badge ${request.priority === 'urgent' ? 'badge-danger' : 'badge-neutral'}`}>
-                        {request.priority}
+                      <span className="badge badge-neutral">{request.modality || 'DX'}</span>
+                    </td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          ['urgent', 'stat'].includes(String(request.priority).toLowerCase())
+                            ? 'badge-danger'
+                            : 'badge-neutral'
+                        }`}
+                      >
+                        {request.priority || 'routine'}
                       </span>
                     </td>
-                    <td>{new Date(request.created_at).toLocaleDateString()}</td>
-                    <td>{request.status}</td>
+                    <td>
+                      {request.created_at
+                        ? new Date(request.created_at).toLocaleDateString()
+                        : new Date().toLocaleDateString()}
+                    </td>
+                    <td>
+                      <span className="badge badge-ok">{request.status}</span>
+                    </td>
                     <td>
                       {request.status === 'submitted' ? (
                         <button
@@ -95,8 +161,12 @@ export default function ImagingRequests() {
                           Claim
                         </button>
                       ) : (
-                        <button type="button" className="secondary-button">
-                          View
+                        <button
+                          type="button"
+                          className="primary-button"
+                          onClick={() => handleOpenStudy(request)}
+                        >
+                          Open Study
                         </button>
                       )}
                     </td>

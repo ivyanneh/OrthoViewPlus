@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-export function createDashboardRouter({ orthanc, audit }) {
+export function createDashboardRouter({ orthanc, audit, patients, appointments, requests }) {
   const router = Router();
 
   router.get('/', async (req, res, next) => {
@@ -12,14 +12,54 @@ export function createDashboardRouter({ orthanc, audit }) {
         description: `User "${req.user?.username ?? 'unknown'}" viewed the dashboard.`,
       });
 
-      const summary = await orthanc.getDashboardSummary();
-      const recentAudit = req.user?.role === 'administrator'
-        ? audit.list({ limit: 5 }).entries
+      // Calculate realistic practitioner dashboard metrics from database
+      const todayAppointments = appointments
+        ? appointments.list({ limit: 500 })
+          .filter((a) => a.scheduled_date >= new Date().toISOString().split('T')[0])
+          .length
+        : 0;
+
+      const pendingRequests = requests
+        ? requests.list({ limit: 500 })
+          .filter((r) => r.status === 'submitted' || r.status === 'scheduled')
+          .length
+        : 0;
+
+      const reportsReady = patients
+        ? patients.list({ limit: 500 })
+          .filter((p) => p.status === 'active')
+          .reduce((sum, p) => sum + (p.reportsReady || 0), 0)
+        : 0;
+
+      const statNotifications = requests
+        ? requests.list({ limit: 500 })
+          .filter((r) => (r.priority || '').toLowerCase() === 'stat' || (r.priority || '').toLowerCase() === 'urgent')
+          .length
+        : 0;
+
+      const recentAudit = req.user?.role === 'administrator' && typeof audit?.list === 'function'
+        ? (audit.list({ limit: 10 })?.entries ?? [])
         : [];
 
+      // Return both camelCase and snake_case keys for frontend compatibility
       res.json({
-        ...summary,
         recentAudit,
+        stats: {
+          todayAppointments,
+          pendingRequests,
+          reportsReady,
+          statNotifications,
+          // snake_case aliases
+          today_appointments: todayAppointments,
+          pending_requests: pendingRequests,
+          reports_ready: reportsReady,
+          stat_notifications: statNotifications,
+        },
+        // Also expose individual values at top level for direct access
+        todayAppointments,
+        pendingRequests,
+        reportsReady,
+        statNotifications,
       });
     } catch (error) {
       next(error);

@@ -1,4 +1,6 @@
+
 import { Navigate, Route, Routes } from 'react-router-dom';
+
 import Layout from './components/Layout.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import Login from './pages/Login.jsx';
@@ -42,15 +44,24 @@ import AdminRoute from './components/AdminRoute.jsx';
 import PractitionerRoute from './components/PractitionerRoute.jsx';
 import ClinicalRoute from './components/ClinicalRoute.jsx';
 import RadiologistRoute from './components/RadiologistRoute.jsx';
+
 import { useAuth } from './context/AuthContext.jsx';
+import { ThemeProvider } from './hooks/useTheme.jsx';
 import { homePathFor } from './utils/format.js';
 
 function HomeRedirect() {
   const { isAuthenticated, ready, user } = useAuth();
+
   if (!ready) {
     return <div className="auth-loading">Loading OrthoView+...</div>;
   }
-  return <Navigate to={isAuthenticated ? homePathFor(user?.role) : '/login'} replace />;
+
+  return (
+    <Navigate
+      to={isAuthenticated ? homePathFor(user?.role) : '/login'}
+      replace
+    />
+  );
 }
 
 const practitionerPages = [
@@ -95,52 +106,105 @@ const adminPages = [
   ['/admin/system', <SystemAdministration />],
   ['/admin/profile', <AdminProfile />],
   ['/admin/imaging-studies', <ImagingStudyManagement />],
+  ['/admin/patient-mapping', <ImagingStudyManagement />],
+  ['/admin/study-linking', <ImagingStudyManagement />],
 ];
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<HomeRedirect />} />
-      <Route path="/login" element={<Login />} />
-      
-      {/* PROTECTED WORKSPACE ROUTES */}
-      <Route
-        element={
-          <ProtectedRoute>
-            <Layout />
-          </ProtectedRoute>
-        }
-      >
-        <Route path="/notifications" element={<NotificationsPage />} />
+    <ThemeProvider>
+      <Routes>
+        <Route path="/" element={<HomeRedirect />} />
+        <Route path="/login" element={<Login />} />
 
-        {/* Health Practitioner Workspace */}
-        {practitionerPages.map(([path, element]) => (
-          <Route key={path} path={path} element={<PractitionerRoute>{element}</PractitionerRoute>} />
-        ))}
+        {/* Protected Workspace Routes */}
+        <Route
+          element={
+            <ProtectedRoute>
+              <Layout />
+            </ProtectedRoute>
+          }
+        >
+          <Route
+            path="/notifications"
+            element={<NotificationsPage />}
+          />
 
-        {/* Shared Clinical Workspaces */}
-        {clinicalPages.map(([path, element]) => (
-          <Route key={path} path={path} element={<ClinicalRoute>{element}</ClinicalRoute>} />
-        ))}
+          {/* Health Practitioner Workspace */}
+          {practitionerPages.map(([path, element]) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <PractitionerRoute>
+                  {element}
+                </PractitionerRoute>
+              }
+            />
+          ))}
 
-        {/* Radiologist Workspace */}
-        {radiologistPages.map(([path, element]) => (
-          <Route key={path} path={path} element={<RadiologistRoute>{element}</RadiologistRoute>} />
-        ))}
+          {/* Shared Clinical Workspaces */}
+          {clinicalPages.map(([path, element]) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <ClinicalRoute>
+                  {element}
+                </ClinicalRoute>
+              }
+            />
+          ))}
 
-        {/* Administrator Workspace */}
-        {adminPages.map(([path, element]) => (
-          <Route key={path} path={path} element={<AdminRoute>{element}</AdminRoute>} />
-        ))}
+          {/* Radiologist Workspace */}
+          {radiologistPages.map(([path, element]) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <RadiologistRoute>
+                  {element}
+                </RadiologistRoute>
+              }
+            />
+          ))}
 
-        {/* Legacy & Shortcut Redirects */}
-        <Route path="/audit-log" element={<Navigate to="/admin/audit-logs" replace />} />
-        <Route path="/admin/patients" element={<Navigate to="/admin/patients-imaging" replace />} />
-        <Route path="/admin/schedule" element={<Navigate to="/admin/scheduling" replace />} />
-      </Route>
+          {/* Administrator Workspace */}
+          {adminPages.map(([path, element]) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <AdminRoute>
+                  {element}
+                </AdminRoute>
+              }
+            />
+          ))}
 
-      {/* FALLBACK CATCH-ALL */}
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+          {/* Legacy & Shortcut Redirects */}
+          <Route
+            path="/audit-log"
+            element={<Navigate to="/admin/audit-logs" replace />}
+          />
+
+          <Route
+            path="/admin/patients"
+            element={<Navigate to="/admin/patients-imaging" replace />}
+          />
+
+          <Route
+            path="/admin/schedule"
+            element={<Navigate to="/admin/scheduling" replace />}
+          />
+        </Route>
+
+        {/* Fallback Catch-All */}
+        <Route
+          path="*"
+          element={<Navigate to="/" replace />}
+        />
+      </Routes>
+    </ThemeProvider>
   );
 }

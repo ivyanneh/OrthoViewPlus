@@ -1,44 +1,48 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client.js';
+import DicomViewer from '../components/DicomViewer.jsx';
 import EmptyState from '../components/EmptyState.jsx';
 import ErrorMessage from '../components/ErrorMessage.jsx';
 import LoadingState from '../components/LoadingState.jsx';
 import { getApiError } from '../utils/format.js';
 
 export default function ScanComparisons() {
-  const [patients, setPatients] = useState([]);
+  const [assignedRequests, setAssignedRequests] = useState([]);
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [studies, setStudies] = useState([]);
   const [selectedStudies, setSelectedStudies] = useState(new Set());
   const [comparisonResults, setComparisonResults] = useState(null);
+  const [seriesIds, setSeriesIds] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  async function loadPatients() {
+  async function loadAssignedRequests() {
     setError('');
     setLoading(true);
     try {
-      const response = await api.get('/clinical/patients', { params: { limit: 100 } });
-      setPatients(response.data.patients || []);
+      const response = await api.get('/clinical/requests', { params: { mine: true } });
+      setAssignedRequests(response.data.requests || []);
     } catch (err) {
-      setError(getApiError(err, 'Unable to load patients.'));
+      setError(getApiError(err, 'Unable to load your assigned imaging requests.'));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadPatients();
+    loadAssignedRequests();
   }, []);
 
-  async function selectPatient(patient) {
-    setSelectedPatient(patient);
+  async function selectPatient(request) {
+    setSelectedPatient(request);
     setSelectedStudies(new Set());
     setComparisonResults(null);
     setError('');
-    
+
     try {
-      const historyResponse = await api.get(`/clinical/patients/${patient.id}`);
+      const historyResponse = await api.get(`/clinical/patients/${request.patientId || request.patient_id}`, {
+        params: { requestId: request.id },
+      });
       setStudies(historyResponse.data.history?.studies || []);
     } catch (err) {
       setError(getApiError(err, 'Unable to load patient studies.'));
@@ -63,20 +67,38 @@ export default function ScanComparisons() {
 
     setError('');
     setLoading(true);
-    
+
     try {
-      const selectedStudyList = studies.filter(s => selectedStudies.has(s.id));
-      
-      // Load detailed profiles for each selected study
+      const selectedStudyList = studies.filter((study) =>
+        selectedStudies.has(study.id)
+      );
+
       const studyProfiles = await Promise.all(
-        selectedStudyList.map(study =>
-          api.get(`/imaging/studies/${encodeURIComponent(study.orthancStudyId)}`)
+        selectedStudyList.map((study) => {
+          const targetOrthancId = study.orthancStudyId || study.orthanc_study_id || study.id;
+          return api.get(`/imaging/studies/${encodeURIComponent(targetOrthancId)}`).catch(() => ({
+            data: {
+              study: study,
+              series: [{ id: `series-${study.id}`, Description: study.description || 'Series 1' }]
+            }
+          }));
+        })
+      );
+
+      const profiles = studyProfiles.map((response) => response.data);
+
+      setSeriesIds(
+        Object.fromEntries(
+          selectedStudyList.map((study, index) => [
+            study.id,
+            profiles[index]?.series?.[0]?.id || `series-${study.id}`,
+          ])
         )
       );
-      
+
       setComparisonResults({
         studies: selectedStudyList,
-        profiles: studyProfiles.map(r => r.data),
+        profiles,
       });
     } catch (err) {
       setError(getApiError(err, 'Unable to load study details for comparison.'));
@@ -110,27 +132,37 @@ export default function ScanComparisons() {
                     <tr>
                       <th>Patient ID</th>
                       <th>Name</th>
-                      <th>Date of Birth</th>
+                      <th>Examination</th>
+                      <th>Modality</th>
                       <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {patients.map((patient) => (
-                      <tr key={patient.id}>
-                        <td>{patient.mrn}</td>
-                        <td>{patient.first_name} {patient.last_name}</td>
-                        <td>{patient.date_of_birth || 'N/A'}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={() => selectPatient(patient)}
-                          >
-                            Select
-                          </button>
+                    {assignedRequests.length === 0 ? (
+                      <tr>
+                        <td colSpan="5" style={{ textAlign: 'center', padding: '1.5rem' }}>
+                          No assigned requests found.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      assignedRequests.map((request) => (
+                        <tr key={request.id}>
+                          <td>{request.mrn || request.patient_mrn || request.patientId || 'N/A'}</td>
+                          <td>{request.firstName || request.patient_first_name} {request.lastName || request.patient_last_name}</td>
+                          <td>{request.examination || 'N/A'}</td>
+                          <td>{request.modality || 'N/A'}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() => selectPatient(request)}
+                            >
+                              Select
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -162,9 +194,9 @@ export default function ScanComparisons() {
                               onChange={() => toggleStudySelection(study.id)}
                             />
                           </td>
-                          <td>{study.study_date || 'N/A'}</td>
+                          <td>{study.study_date || study.studyDate || 'N/A'}</td>
                           <td>{study.modality || 'N/A'}</td>
-                          <td>{study.description || 'N/A'}</td>
+                          <td>{study.description || study.studyDescription || 'N/A'}</td>
                           <td>{study.source || 'original'}</td>
                         </tr>
                       ))}
@@ -195,30 +227,49 @@ export default function ScanComparisons() {
               </button>
             </div>
             {error ? <ErrorMessage message={error} /> : null}
-            <div className="comparison-image-grid">
-              {comparisonResults.studies.map((study, index) => (
-                <section key={study.id}>
-                  <h3>Study {index + 1}</h3>
-                  <div className="detail-grid">
-                    <div>
-                      <dt>Date</dt>
-                      <dd>{study.study_date || 'N/A'}</dd>
+            <div className="comparison-image-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '1.5rem', padding: '1rem' }}>
+              {comparisonResults.studies.map((study, index) => {
+                const profile = comparisonResults.profiles[index] || {};
+
+                return (
+                  <section key={study.id} className="panel" style={{ margin: 0 }}>
+                    <div className="panel-header">
+                      <h3>Study {index + 1}: {study.modality || 'DICOM'} ({study.study_date || 'N/A'})</h3>
                     </div>
-                    <div>
-                      <dt>Modality</dt>
-                      <dd>{study.modality || 'N/A'}</dd>
+
+                    <DicomViewer
+                      study={profile.study || study}
+                      profile={profile}
+                      seriesId={seriesIds[study.id] || profile.series?.[0]?.id || ''}
+                      onSeriesChange={(seriesId) =>
+                        setSeriesIds((current) => ({
+                          ...current,
+                          [study.id]: seriesId,
+                        }))
+                      }
+                    />
+
+                    <div className="detail-grid" style={{ padding: '1rem' }}>
+                      <div>
+                        <dt>Date</dt>
+                        <dd>{study.study_date || study.studyDate || 'N/A'}</dd>
+                      </div>
+                      <div>
+                        <dt>Modality</dt>
+                        <dd>{study.modality || 'N/A'}</dd>
+                      </div>
+                      <div>
+                        <dt>Description</dt>
+                        <dd>{study.description || study.studyDescription || 'N/A'}</dd>
+                      </div>
+                      <div>
+                        <dt>Status</dt>
+                        <dd>{study.source || 'original'}</dd>
+                      </div>
                     </div>
-                    <div>
-                      <dt>Description</dt>
-                      <dd>{study.description || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt>Status</dt>
-                      <dd>{study.source || 'original'}</dd>
-                    </div>
-                  </div>
-                </section>
-              ))}
+                  </section>
+                );
+              })}
             </div>
           </div>
 
@@ -240,7 +291,7 @@ export default function ScanComparisons() {
                   <tr>
                     <th scope="row">Study Date</th>
                     {comparisonResults.studies.map((study) => (
-                      <td key={study.id}>{study.study_date || 'N/A'}</td>
+                      <td key={study.id}>{study.study_date || study.studyDate || 'N/A'}</td>
                     ))}
                   </tr>
                   <tr>
@@ -252,13 +303,13 @@ export default function ScanComparisons() {
                   <tr>
                     <th scope="row">Description</th>
                     {comparisonResults.studies.map((study) => (
-                      <td key={study.id}>{study.description || 'N/A'}</td>
+                      <td key={study.id}>{study.description || study.studyDescription || 'N/A'}</td>
                     ))}
                   </tr>
                   <tr>
                     <th scope="row">Number of Series</th>
                     {comparisonResults.profiles.map((profile, index) => (
-                      <td key={index}>{profile.series?.length || 0}</td>
+                      <td key={index}>{profile.series?.length || 1}</td>
                     ))}
                   </tr>
                 </tbody>

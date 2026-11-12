@@ -1,8 +1,58 @@
+
 /* =========================================================================
    OrthoView+ clinical workstation theme
    Dark navy/slate workspace, restrained cyan accent, compact data density.
    ========================================================================= */
+/* Master Theme Bindings */
+[data-theme="light"], body.light {
+  --bg-main: #F4F6F8;
+  --bg-card: #FFFFFF;
+  --bg-header: #F8FAFC;
+  --text-main: #0F172A;
+  --text-sub: #64748B;
+  --border-main: #E2E7EC;
+  --input-bg: #FFFFFF;
+}
 
+[data-theme="dark"], body.dark {
+  --bg-main: #0D1928;
+  --bg-card: #142438;
+  --bg-header: #1B2E46;
+  --text-main: #F8FAFC;
+  --text-sub: #8899A6;
+  --border-main: #1F334D;
+  --input-bg: #101E30;
+}
+
+/* Force UI elements to map to theme variables */
+.app-card,
+.panel,
+.stat-card,
+.modal-content,
+.table-container,
+.workspace-card,
+.settings-panel,
+.dashboard-card {
+  background-color: var(--bg-card) !important;
+  color: var(--text-main) !important;
+  border-color: var(--border-main) !important;
+}
+
+/* Force Headers, Labels, and Text */
+h1, h2, h3, h4, h5, h6, label, th, td {
+  color: var(--text-main);
+}
+
+p, span:not([class*="badge"]), small {
+  color: var(--text-sub);
+}
+
+/* Force Form Controls */
+input, select, textarea {
+  background-color: var(--input-bg) !important;
+  color: var(--text-main) !important;
+  border-color: var(--border-main) !important;
+}
 :root {
   color-scheme: light;
 
@@ -132,8 +182,8 @@ abbr {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #142438;
-  border-right: 1px solid #0D1928;
+  background: var(--sidebar-bg, #142438);
+  border-right: 1px solid var(--sidebar-border, #0D1928);
   color: #DDF3F0;
 }
 
@@ -3035,3 +3085,180 @@ a.topbar-user:hover strong {
   color-scheme: dark;
 }
 
+/* ==========================================================================
+   THEME SYNCHRONIZATION OVERRIDES (APPENDED AT BOTTOM)
+   ========================================================================== */
+
+/* Light Mode Defaults */
+:root, [data-theme="light"], body.light {
+  --bg-primary: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-input: #f8fafc;
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --border-color: #e2e8f0;
+}
+
+/* Dark Mode Overrides */
+[data-theme="dark"], body.dark, .dark {
+  --bg-primary: #0b1329 !important;
+  --bg-card: #151e38 !important;
+  --bg-input: var(--input);
+  --text-primary: var(--ink);
+  --text-secondary: var(--muted);
+  --border-color: var(--line);
+}
+
+/* Force layout containers to react to theme CSS variables */
+body, html, .page-container, .page, main {
+  background-color: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* =========================================================================
+   ORTHOVIEW+ DARK MODE OVERRIDES (MAPPED TO EXISTING VARIABLES)
+   ========================================================================= */
+
+html[data-theme="dark"],
+body.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Dark Theme Surfaces */
+  --bg-deep: #080f19;
+  --bg: #0b1329;
+  --surface: #151e38;
+  --surface-2: #1e293b;
+  --surface-3: #1a2e3b;
+  --input: #0f172a;
+
+  /* Dark Theme Typography */
+  --ink: #f8fafc;
+  --ink-2: #e2e8f0;
+  --muted: #94a3b8;
+  --faint: #64748b;
+  --line: #1e293b;
+  --line-strong: #334155;
+
+  /* Dark Theme Accents */
+  --accent: #14b8a6;
+  --accent-2: #2dd4bf;
+  --accent-soft: rgba(20, 184, 166, 0.15);
+  --ring: rgba(20, 184, 166, 0.3);
+  --primary: #14b8a6;
+  --primary-hover: #2dd4bf;
+
+  /* Backward Compatibility Aliases for Cards */
+  --bg-primary: var(--bg);
+  --bg-card: var(--surface);
+  --bg-input: var(--input);
+  --text-primary: var(--ink);
+  --text-secondary: var(--muted);
+  --border-color: var(--line);
+}
+
+/* Force document root & body to adapt to the active theme */
+html, body, .page-container, .page, main {
+  background-color: var(--bg, #0b1329) !important;
+  color: var(--ink, #f8fafc) !important;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+/* =========================================================================
+   ORTHOVIEW+ FORCE THEME OVERRIDES (APPENDED AT BOTTOM)
+   ========================================================================= */
+
+/* Force Dark Mode across all layout wrappers and surfaces */
+html[data-theme="dark"],
+html[data-theme="dark"] body,
+html[data-theme="dark"] #root,
+html[data-theme="dark"] .app-shell,
+html[data-theme="dark"] .workspace,
+html[data-theme="dark"] .topbar,
+html[data-theme="dark"] .main,
+html[data-theme="dark"] .page-container,
+html[data-theme="dark"] .page {
+  background-color: #0b1329 !important;
+  color: #f8fafc !important;
+}
+
+/* Force Dark Mode on all panels, metric cards, tables, and containers */
+html[data-theme="dark"] .metric-card,
+html[data-theme="dark"] .panel,
+html[data-theme="dark"] .card,
+html[data-theme="dark"] .summary-strip > div,
+html[data-theme="dark"] table,
+html[data-theme="dark"] div[style*="background"] {
+  background-color: #151e38 !important;
+  color: #f8fafc !important;
+ border-color: var(--line);
+}
+
+/* Dynamic theme bindings for text elements and headers */
+[data-theme="dark"] h1,
+[data-theme="dark"] h2,
+[data-theme="dark"] h3,
+[data-theme="dark"] strong,
+[data-theme="dark"] th,
+[data-theme="dark"] td {
+  color: var(--ink);
+}
+
+[data-theme="dark"] p,
+[data-theme="dark"] span:not([class*="badge"]),
+[data-theme="dark"] .topbar-crumb,
+[data-theme="dark"] .topbar-date {
+  color: var(--muted);
+}
+
+/* Dynamic theme bindings for inputs and search fields */
+[data-theme="dark"] input,
+[data-theme="dark"] select,
+[data-theme="dark"] textarea {
+  background-color: var(--input);
+  color: var(--ink);
+  border-color: var(--line);
+}
+/* Dynamic Theme Overrides for Sidebar, Topbar, and Avatar */
+html[data-theme="light"] .sidebar,
+body[data-theme="light"] .sidebar,
+.light .sidebar {
+  background-color: var(--surface, #FFFFFF) !important;
+  border-right-color: var(--line, #E2E7EC) !important;
+}
+
+html[data-theme="light"] .topbar,
+body[data-theme="light"] .topbar,
+.light .topbar {
+  background-color: var(--topbar-bg, #FFFFFF) !important;
+  border-bottom-color: var(--line, #E2E7EC) !important;
+}
+
+html[data-theme="light"] .avatar,
+body[data-theme="light"] .avatar,
+.light .avatar {
+  background-color: var(--surface-3, #E2E7EC) !important;
+  color: var(--ink, #0F172A) !important;
+}
+
+/* Dark Mode explicit overrides */
+html[data-theme="dark"] .sidebar,
+body[data-theme="dark"] .sidebar,
+.dark .sidebar {
+  background-color: #142438 !important;
+  border-right-color: #0D1928 !important;
+}
+
+html[data-theme="dark"] .topbar,
+body[data-theme="dark"] .topbar,
+.dark .topbar {
+  background-color: rgba(11, 19, 32, 0.92) !important;
+  border-bottom-color: #1F334D !important;
+}
+
+html[data-theme="dark"] .avatar,
+body[data-theme="dark"] .avatar,
+.dark .avatar {
+  background-color: rgb(28, 50, 82) !important;
+  color: #F8FAFC !important;
+}

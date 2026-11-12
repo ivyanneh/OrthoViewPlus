@@ -1,11 +1,11 @@
-﻿import { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import api from '../../api/client.js';
 import ErrorMessage from '../../components/ErrorMessage.jsx';
 import LoadingState from '../../components/LoadingState.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { useAuth } from '../../context/AuthContext.jsx';
 import useApiData from '../../hooks/useApiData.js';
-import useTheme from '../../hooks/useTheme.js';
+import useTheme from '../../hooks/useTheme.jsx';
 import {
   formatDateTime,
   formatRole,

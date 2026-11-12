@@ -153,7 +153,7 @@ export default function RadiologistDashboard() {
   async function openRequest(request) {
     setSelectedRequestId(String(request.id));
     const linkedStudy = studies.find((study) => Number(study.imagingRequestId) === Number(request.id));
-    if (linkedStudy) await openStudy(linkedStudy);
+    if (linkedStudy) await openStudy(linkedStudy, request.id);
     else {
       setSelectedStudyId('');
       setStudyProfile(null);
@@ -172,7 +172,7 @@ export default function RadiologistDashboard() {
     }
   }
 
-  async function openStudy(study) {
+  async function openStudy(study, requestIdOverride = null) {
     setSelectedStudyId(study.id);
     setSelectedPriorStudyId('');
     setStudyProfile(null);
@@ -190,10 +190,15 @@ export default function RadiologistDashboard() {
       setSeriesId(response.data.series?.[0]?.id || '');
       const patientRecordId = response.data.linkedPatient?.id || study.patientRecordId;
       if (patientRecordId) {
-        const requestId = response.data.imagingRequestId || study.imagingRequestId;
+        const requestId = requestIdOverride || response.data.imagingRequestId || study.imagingRequestId;
+
+        if (!requestId) {
+          throw new Error('This study has no linked imaging request. Open it from an assigned imaging request.');
+        }
+
         const [history, reportList] = await Promise.all([
           api.get(`/clinical/patients/${patientRecordId}`, {
-            params: requestId ? { requestId } : undefined,
+            params: { requestId },
           }),
           api.get('/clinical/reports', {
             params: { patientId: patientRecordId, mine: 'true' },

@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import hashlib
 import numpy as np
 import pydicom
 from pydicom.dataset import FileDataset, FileMetaDataset
@@ -28,25 +29,100 @@ SOP_CLASSES = {
 }
 
 
-def _make_pixels(rows: int, columns: int, seed: int) -> np.ndarray:
-    """Create a deterministic synthetic image phantom, not a clinical scan."""
+
+def _make_pixels(
+    rows: int,
+    columns: int,
+    seed: int,
+    body_part: str = "UNSPECIFIED",
+) -> np.ndarray:
+    """Create a deterministic, illustrative synthetic phantom.
+
+    These geometric patterns are demonstrations of image-processing
+    workflows. They are not realistic medical images or diagnostic data.
+    """
     rng = np.random.default_rng(seed)
 
     y, x = np.mgrid[-1:1:complex(rows), -1:1:complex(columns)]
     image = np.full((rows, columns), 1200.0, dtype=np.float32)
 
-    # Synthetic elliptical structures for image-processing demonstrations.
-    ellipse_a = (x / 0.68) ** 2 + (y / 0.82) ** 2 <= 1
-    ellipse_b = ((x + 0.28) / 0.18) ** 2 + ((y - 0.12) / 0.30) ** 2 <= 1
-    ellipse_c = ((x - 0.25) / 0.16) ** 2 + ((y + 0.18) / 0.26) ** 2 <= 1
+    part = str(body_part).upper().replace(" ", "").replace("-", "")
 
-    image[ellipse_a] = 900
-    image[ellipse_b] = 2400
-    image[ellipse_c] = 2100
+    def ellipse(cx, cy, rx, ry):
+        return ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1
 
-    image += rng.normal(0, 25, size=(rows, columns))
+    if part == "ARM":
+        image[ellipse(0, 0, 0.34, 0.88)] = 850
+        image[ellipse(0, 0, 0.105, 0.73)] = 2500
+        image[ellipse(-0.17, 0.05, 0.055, 0.48)] = 2100
+        image[ellipse(0, -0.76, 0.23, 0.12)] = 1600
+
+    elif part == "LEG":
+        image[ellipse(0, 0, 0.48, 0.92)] = 850
+        image[ellipse(-0.06, -0.28, 0.13, 0.53)] = 2550
+        image[ellipse(0.19, 0.28, 0.075, 0.48)] = 2150
+        image[ellipse(0, 0.72, 0.28, 0.15)] = 1650
+
+    elif part == "CHEST":
+        image[ellipse(0, 0, 0.83, 0.91)] = 850
+        image[ellipse(-0.34, -0.02, 0.27, 0.67)] = 350
+        image[ellipse(0.34, -0.02, 0.27, 0.67)] = 350
+        image[ellipse(0, 0.05, 0.17, 0.58)] = 1750
+        image[ellipse(0, -0.62, 0.23, 0.17)] = 2100
+        for rib in range(6):
+            yy = -0.55 + rib * 0.19
+            curve = yy + 0.055 * (x ** 2)
+            rib_mask = (
+                (np.abs(y - curve) < 0.012)
+                & (np.abs(x) > 0.13)
+                & (np.abs(x) < 0.70)
+            )
+            image[rib_mask] = 1450
+
+    elif part == "BRAIN":
+        image[ellipse(0, 0, 0.79, 0.91)] = 650
+        image[ellipse(0, 0, 0.69, 0.81)] = 1150
+        image[ellipse(-0.29, 0, 0.29, 0.66)] = 1450
+        image[ellipse(0.29, 0, 0.29, 0.66)] = 1450
+        image[ellipse(-0.10, 0.02, 0.07, 0.19)] = 500
+        image[ellipse(0.10, 0.02, 0.07, 0.19)] = 500
+        image[ellipse(0, 0.55, 0.16, 0.13)] = 1800
+
+    elif part == "ABDOMEN":
+        image[ellipse(0, 0, 0.79, 0.91)] = 850
+        image[ellipse(-0.36, -0.20, 0.23, 0.35)] = 1350
+        image[ellipse(0.34, -0.20, 0.25, 0.36)] = 1250
+        image[ellipse(0, 0.35, 0.22, 0.18)] = 1750
+        image[ellipse(0, -0.58, 0.12, 0.23)] = 2400
+        image[ellipse(-0.25, 0.55, 0.20, 0.16)] = 1550
+        image[ellipse(0.25, 0.55, 0.20, 0.16)] = 1550
+
+    elif part in ("LSPINE", "LUMBARSPINE"):
+        image[ellipse(0, 0, 0.72, 0.92)] = 850
+        for vertebra in range(5):
+            cy = -0.66 + vertebra * 0.32
+            image[ellipse(0, cy, 0.27, 0.105)] = 2400
+            image[ellipse(0, cy, 0.12, 0.045)] = 1750
+        for disc in range(4):
+            cy = -0.50 + disc * 0.32
+            image[ellipse(0, cy, 0.20, 0.035)] = 500
+        image[ellipse(0, 0.88, 0.22, 0.09)] = 1700
+
+    elif part == "KNEE":
+        image[ellipse(0, 0, 0.65, 0.91)] = 850
+        image[ellipse(-0.22, -0.43, 0.18, 0.43)] = 2450
+        image[ellipse(0.22, -0.43, 0.18, 0.43)] = 2450
+        image[ellipse(-0.22, 0.43, 0.17, 0.40)] = 2200
+        image[ellipse(0.22, 0.43, 0.17, 0.40)] = 2200
+        image[ellipse(0, 0, 0.13, 0.12)] = 500
+
+    else:
+        image[ellipse(0, 0, 0.68, 0.82)] = 900
+        image[ellipse(-0.25, 0.10, 0.17, 0.28)] = 2400
+        image[ellipse(0.25, -0.10, 0.17, 0.28)] = 2100
+
+    image += rng.normal(0, 18, size=(rows, columns))
     return np.clip(image, 0, 4095).astype(np.uint16)
-
 
 def generate_synthetic_dicom(
     output_path: str | Path,
@@ -186,6 +262,7 @@ def generate_synthetic_dicom(
 
 import json
 from pathlib import Path
+import hashlib
 import numpy as np
 import pydicom
 
@@ -195,6 +272,7 @@ def _make_pixels_multislice(
     rows: int = 128,
     columns: int = 128,
     seed: int = 42,
+    body_part: str = "UNSPECIFIED",
 ) -> np.ndarray:
     """Create a deterministic stack of synthetic 2D image slices."""
     if slices < 1:
@@ -202,7 +280,7 @@ def _make_pixels_multislice(
 
     volume = []
     for index in range(slices):
-        pixels = _make_pixels(rows, columns, seed + index)
+        pixels = _make_pixels(rows, columns, seed + index, body_part=body_part)
         # Slight deterministic variation between adjacent slices.
         adjustment = int(index * 3)
         pixels = np.clip(
@@ -220,9 +298,10 @@ def _make_pixels_ct_volume(
     rows: int = 128,
     columns: int = 128,
     seed: int = 42,
+    body_part: str = "UNSPECIFIED",
 ) -> np.ndarray:
     """Create a synthetic CT-like volume for reconstruction demonstrations."""
-    volume = _make_pixels_multislice(slices, rows, columns, seed)
+    volume = _make_pixels_multislice(slices, rows, columns, seed, body_part=body_part)
 
     # Add a deterministic central structure that changes across slices.
     y, x = np.mgrid[-1:1:complex(rows), -1:1:complex(columns)]
@@ -405,6 +484,10 @@ def generate_multi_series_study(
             "slices": 1,
         }]
 
+    patient_seed = int.from_bytes(
+        hashlib.sha256(patient["patient_id"].encode("utf-8")).digest()[:4],
+        "big",
+    )
     study_uid = generate_uid()
     records = []
 
@@ -440,14 +523,16 @@ def generate_multi_series_study(
                 slice_count,
                 rows=128,
                 columns=128,
-                seed=study_index * 1000 + series_number * 100,
+                seed=patient_seed + study_index * 1000 + series_number * 100,
+                body_part=patient.get("body_part", "UNSPECIFIED"),
             )
         else:
             volume = _make_pixels_multislice(
                 slice_count,
                 rows=128,
                 columns=128,
-                seed=study_index * 1000 + series_number * 100,
+                seed=patient_seed + study_index * 1000 + series_number * 100,
+                body_part=patient.get("body_part", "UNSPECIFIED"),
             )
 
         series_folder = study_folder / f"series_{series_number:02d}"

@@ -20,6 +20,15 @@ export default function RadiologistWorkspaceDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // State for Add Event Modal
+  const [showAddEventModal, setShowAddEventModal] = useState(false);
+  const [newEvent, setNewEvent] = useState({
+    time: '09:00 AM',
+    patient: '',
+    examination: '',
+    modality: 'DX',
+  });
+
   useEffect(() => {
     loadDashboardData();
   }, [selectedDate]);
@@ -47,8 +56,9 @@ export default function RadiologistWorkspaceDashboard() {
       }
 
       if (scheduleResult.status === 'fulfilled') {
-        setSchedule(scheduleResult.value.data.appointments || []);
-        setFilteredSchedule(scheduleResult.value.data.appointments || []);
+        const appts = scheduleResult.value.data.appointments || [];
+        setSchedule(appts);
+        setFilteredSchedule(appts);
       } else {
         setError((current) => current || getApiError(scheduleResult.reason, 'Unable to load examination schedule.'));
       }
@@ -74,6 +84,24 @@ export default function RadiologistWorkspaceDashboard() {
     }
     
     setSelectedDate(newDate.toISOString().split('T')[0]);
+  }
+
+  function handleCreateEvent(e) {
+    e.preventDefault();
+    const created = {
+      id: `evt-${Date.now()}`,
+      scheduled_time: newEvent.time,
+      patient_id: newEvent.patient || '99',
+      examination: newEvent.examination || 'Routine Scan',
+      modality: newEvent.modality,
+      status: 'scheduled',
+    };
+
+    setFilteredSchedule((prev) => [created, ...prev]);
+    setSchedule((prev) => [created, ...prev]);
+    setMetrics((prev) => ({ ...prev, scheduledToday: prev.scheduledToday + 1 }));
+    setShowAddEventModal(false);
+    setNewEvent({ time: '09:00 AM', patient: '', examination: '', modality: 'DX' });
   }
 
   if (loading) return <LoadingState message="Loading dashboard..." />;
@@ -152,7 +180,7 @@ export default function RadiologistWorkspaceDashboard() {
           <button type="button" className="secondary-button" onClick={() => handleDateFilter('upcoming')}>
             Upcoming
           </button>
-          <button type="button" className="primary-button">
+          <button type="button" className="primary-button" onClick={() => setShowAddEventModal(true)}>
             + Add Event
           </button>
         </div>
@@ -189,6 +217,79 @@ export default function RadiologistWorkspaceDashboard() {
           </div>
         )}
       </div>
+
+      {/* Add Event Modal */}
+      {showAddEventModal && (
+        <div className="modal-overlay" style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <div className="panel" style={{ width: '450px', maxWidth: '90%', background: 'var(--bg-panel, #fff)', padding: '1.5rem', borderRadius: '8px' }}>
+            <div className="panel-header" style={{ marginBottom: '1rem' }}>
+              <h3>Schedule Radiology Event</h3>
+            </div>
+            <form onSubmit={handleCreateEvent}>
+              <div className="field" style={{ marginBottom: '1rem' }}>
+                <label>Time</label>
+                <input
+                  type="text"
+                  value={newEvent.time}
+                  onChange={(e) => setNewEvent({ ...newEvent, time: e.target.value })}
+                  placeholder="e.g. 10:30 AM"
+                  required
+                />
+              </div>
+              <div className="field" style={{ marginBottom: '1rem' }}>
+                <label>Patient ID / Name</label>
+                <input
+                  type="text"
+                  value={newEvent.patient}
+                  onChange={(e) => setNewEvent({ ...newEvent, patient: e.target.value })}
+                  placeholder="e.g. 102 (Brian Mwangi)"
+                  required
+                />
+              </div>
+              <div className="field" style={{ marginBottom: '1rem' }}>
+                <label>Examination / Body Part</label>
+                <input
+                  type="text"
+                  value={newEvent.examination}
+                  onChange={(e) => setNewEvent({ ...newEvent, examination: e.target.value })}
+                  placeholder="e.g. Forearm X-Ray"
+                  required
+                />
+              </div>
+              <div className="field" style={{ marginBottom: '1.5rem' }}>
+                <label>Modality</label>
+                <select
+                  value={newEvent.modality}
+                  onChange={(e) => setNewEvent({ ...newEvent, modality: e.target.value })}
+                >
+                  <option value="DX">DX (Digital X-Ray)</option>
+                  <option value="MR">MR (MRI)</option>
+                  <option value="CT">CT (Computed Tomography)</option>
+                </select>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+                <button type="button" className="secondary-button" onClick={() => setShowAddEventModal(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary-button">
+                  Save Event
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

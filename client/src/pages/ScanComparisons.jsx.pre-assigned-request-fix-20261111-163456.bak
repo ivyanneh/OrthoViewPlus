@@ -1,0 +1,272 @@
+import { useEffect, useState } from 'react';
+import api from '../api/client.js';
+import EmptyState from '../components/EmptyState.jsx';
+import ErrorMessage from '../components/ErrorMessage.jsx';
+import LoadingState from '../components/LoadingState.jsx';
+import { getApiError } from '../utils/format.js';
+
+export default function ScanComparisons() {
+  const [patients, setPatients] = useState([]);
+  const [selectedPatient, setSelectedPatient] = useState(null);
+  const [studies, setStudies] = useState([]);
+  const [selectedStudies, setSelectedStudies] = useState(new Set());
+  const [comparisonResults, setComparisonResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  async function loadPatients() {
+    setError('');
+    setLoading(true);
+    try {
+      const response = await api.get('/clinical/patients', { params: { limit: 100 } });
+      setPatients(response.data.patients || []);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load patients.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPatients();
+  }, []);
+
+  async function selectPatient(patient) {
+    setSelectedPatient(patient);
+    setSelectedStudies(new Set());
+    setComparisonResults(null);
+    setError('');
+    
+    try {
+      const historyResponse = await api.get(`/clinical/patients/${patient.id}`);
+      setStudies(historyResponse.data.history?.studies || []);
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load patient studies.'));
+    }
+  }
+
+  function toggleStudySelection(studyId) {
+    const newSelection = new Set(selectedStudies);
+    if (newSelection.has(studyId)) {
+      newSelection.delete(studyId);
+    } else {
+      newSelection.add(studyId);
+    }
+    setSelectedStudies(newSelection);
+  }
+
+  async function compareSelectedScans() {
+    if (selectedStudies.size < 2) {
+      setError('Select at least 2 studies to compare.');
+      return;
+    }
+
+    setError('');
+    setLoading(true);
+    
+    try {
+      const selectedStudyList = studies.filter(s => selectedStudies.has(s.id));
+      
+      // Load detailed profiles for each selected study
+      const studyProfiles = await Promise.all(
+        selectedStudyList.map(study =>
+          api.get(`/imaging/studies/${encodeURIComponent(study.orthancStudyId)}`)
+        )
+      );
+      
+      setComparisonResults({
+        studies: selectedStudyList,
+        profiles: studyProfiles.map(r => r.data),
+      });
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load study details for comparison.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleNewSearch() {
+    setSelectedPatient(null);
+    setStudies([]);
+    setSelectedStudies(new Set());
+    setComparisonResults(null);
+  }
+
+  return (
+    <section className="page">
+      {!comparisonResults ? (
+        <>
+          <div className="panel">
+            <div className="panel-header">
+              <h3>Select Patient for Comparison</h3>
+            </div>
+            {error ? <ErrorMessage message={error} /> : null}
+            {loading ? <LoadingState message="Loading patients..." /> : null}
+            
+            {!selectedPatient ? (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Patient ID</th>
+                      <th>Name</th>
+                      <th>Date of Birth</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {patients.map((patient) => (
+                      <tr key={patient.id}>
+                        <td>{patient.mrn}</td>
+                        <td>{patient.first_name} {patient.last_name}</td>
+                        <td>{patient.date_of_birth || 'N/A'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => selectPatient(patient)}
+                          >
+                            Select
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <>
+                <div className="panel-body">
+                  <button type="button" className="secondary-button" onClick={handleNewSearch}>
+                    Select Different Patient
+                  </button>
+                </div>
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Select</th>
+                        <th>Study Date</th>
+                        <th>Modality</th>
+                        <th>Description</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {studies.map((study) => (
+                        <tr key={study.id}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={selectedStudies.has(study.id)}
+                              onChange={() => toggleStudySelection(study.id)}
+                            />
+                          </td>
+                          <td>{study.study_date || 'N/A'}</td>
+                          <td>{study.modality || 'N/A'}</td>
+                          <td>{study.description || 'N/A'}</td>
+                          <td>{study.source || 'original'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="panel-body">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={compareSelectedScans}
+                    disabled={selectedStudies.size < 2 || loading}
+                  >
+                    Compare Selected Scans ({selectedStudies.size})
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="panel">
+            <div className="panel-header">
+              <h3>Scan Comparison Results</h3>
+              <button type="button" className="secondary-button" onClick={handleNewSearch}>
+                New Comparison
+              </button>
+            </div>
+            {error ? <ErrorMessage message={error} /> : null}
+            <div className="comparison-image-grid">
+              {comparisonResults.studies.map((study, index) => (
+                <section key={study.id}>
+                  <h3>Study {index + 1}</h3>
+                  <div className="detail-grid">
+                    <div>
+                      <dt>Date</dt>
+                      <dd>{study.study_date || 'N/A'}</dd>
+                    </div>
+                    <div>
+                      <dt>Modality</dt>
+                      <dd>{study.modality || 'N/A'}</dd>
+                    </div>
+                    <div>
+                      <dt>Description</dt>
+                      <dd>{study.description || 'N/A'}</dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{study.source || 'original'}</dd>
+                    </div>
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">
+              <h3>Comparison Details</h3>
+            </div>
+            <div className="table-wrap">
+              <table className="data-table comparison-table">
+                <thead>
+                  <tr>
+                    <th scope="row">Attribute</th>
+                    {comparisonResults.studies.map((study, index) => (
+                      <th key={study.id}>Study {index + 1}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <th scope="row">Study Date</th>
+                    {comparisonResults.studies.map((study) => (
+                      <td key={study.id}>{study.study_date || 'N/A'}</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <th scope="row">Modality</th>
+                    {comparisonResults.studies.map((study) => (
+                      <td key={study.id}>{study.modality || 'N/A'}</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <th scope="row">Description</th>
+                    {comparisonResults.studies.map((study) => (
+                      <td key={study.id}>{study.description || 'N/A'}</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <th scope="row">Number of Series</th>
+                    {comparisonResults.profiles.map((profile, index) => (
+                      <td key={index}>{profile.series?.length || 0}</td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}

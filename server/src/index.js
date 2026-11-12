@@ -1,4 +1,3 @@
-
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -66,7 +65,16 @@ const seedResult = seedDemoAccounts(db, {
   radiologistPassword: process.env.DEV_RADIOLOGIST_PASSWORD,
 });
 
-seedDemoClinicalData(db);
+const demoClinicalSeedResult = process.env.ENABLE_DEMO_CLINICAL_SEED === 'true'
+  ? seedDemoClinicalData(db, {
+      practitionerUsername: process.env.DEMO_PRACTITIONER_USERNAME,
+      radiologistUsername: process.env.DEMO_RADIOLOGIST_USERNAME,
+    })
+  : { seeded: false, warnings: [] };
+
+for (const warning of demoClinicalSeedResult.warnings) {
+  console.warn(`Demo seed: ${warning}`);
+}
 
 const audit = createAuditService(db);
 
@@ -130,8 +138,14 @@ aiJobs.recoverInterruptedJobs();
 
 const app = express();
 
-app.use(cors({ origin: CLIENT_ORIGIN }));
+const allowedOrigins = [CLIENT_ORIGIN];
+  // Add approved development origins
+  if (process.env.NODE_ENV !== 'production') {
+    allowedOrigins.push('http://localhost:5173', 'http://localhost:3001', 'http://127.0.0.1:5173', 'http://127.0.0.1:3001');
+  }
+  app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
+app.use('/ai-results', express.static(AI_RESULTS_DIR));
 
 app.use('/api/health', createHealthRouter({ orthanc, aiClient }));
 
@@ -173,7 +187,18 @@ app.use(
   createStatsRouter({ db, users, patients, appointments, orthanc, audit })
 );
 
-app.use('/api/dashboard', requireAuth, createDashboardRouter({ orthanc, audit }));
+// BIND ALL REQUIRED SERVICES TO DASHBOARD ROUTER FOR PRACTITIONER METRICS FIX
+const dashboardRouter = createDashboardRouter({
+  orthanc,
+  audit,
+  patients,
+  appointments,
+  requests,
+  studies
+});
+
+app.use('/api/dashboard', requireAuth, dashboardRouter);
+app.use('/api/practitioner/dashboard', requireAuth, dashboardRouter);
 
 app.use(
   '/api/exposure',

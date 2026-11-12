@@ -1,133 +1,285 @@
-﻿import { useEffect, useState } from 'react';
-import api from '../api/client.js';
-import { StatusBadge } from '../components/StatusBadge.jsx';
-import { DashboardIcon, CalendarIcon, AlertIcon, CheckIcon } from '../components/Icons.jsx';
-import { useAuth } from '../context/AuthContext.jsx';
+﻿import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import EmptyState from '../components/EmptyState.jsx';
+import LoadingState from '../components/LoadingState.jsx';
+import StatusBadge from '../components/StatusBadge.jsx';
+import { SearchIcon } from '../components/Icons.jsx';
+import useApiData from '../hooks/useApiData.js';
+import { formatDateTime, formatValue } from '../utils/format.js';
 
 export default function PractitionerDashboard() {
-  const { user } = useAuth();
-  const [name, setName] = useState('');
-  const [appointmentsToday, setAppointmentsToday] = useState([]);
-  const [pendingRequests, setPendingRequests] = useState([]);
-  const [reportsReady, setReportsReady] = useState([]);
-  const [statNotifications, setStatNotifications] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const navigate = useNavigate();
 
-  useEffect(() => {
-    async function loadDashboard() {
-      setError('');
-      try {
-        const [appResponse, reqResponse, reportResponse, statResponse] = await Promise.all([
-          api.get('/clinical/appointments', { params: { date: new Date().toISOString().slice(0, 10), limit: 20 } }),
-          api.get('/clinical/requests', { params: { limit: 50 } }),
-          api.get('/clinical/reports', { params: { status: 'ready', limit: 20 } }),
-          api.get('/clinical/notifications', { params: { priority: 'STAT', limit: 20 } }),
-        ]);
-        setName(user?.fullName || user?.username || 'Dr. Practitioner');
-        setAppointmentsToday(appResponse.data.appointments || []);
-        setPendingRequests(reqResponse.data.requests || []);
-        setReportsReady(reportResponse.data.reports || []);
-        setStatNotifications(statResponse.data.notifications || []);
-      } catch (err) {
-        setError('Unable to load dashboard data.');
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadDashboard();
-  }, [user?.id]);
+  // Fetch primary dashboard data
+  const { data: dashboardData, loading } = useApiData(
+    '/practitioner/dashboard',
+    null,
+    ''
+  );
+
+  // Fetch fallback scans list if dashboard endpoint is empty
+  const { data: fallbackScans } = useApiData(
+    '/scans',
+    [],
+    ''
+  );
+
+  const [search, setSearch] = useState('');
+
+  // Extract scans safely across diverse backend response structures
+  const scans = useMemo(() => {
+    if (Array.isArray(dashboardData?.scans)) return dashboardData.scans;
+    if (Array.isArray(dashboardData?.recentScans)) return dashboardData.recentScans;
+    if (Array.isArray(dashboardData)) return dashboardData;
+    if (Array.isArray(fallbackScans?.scans)) return fallbackScans.scans;
+    if (Array.isArray(fallbackScans)) return fallbackScans;
+    return [];
+  }, [dashboardData, fallbackScans]);
+
+  const requests = useMemo(() => {
+    if (Array.isArray(dashboardData?.requests)) return dashboardData.requests;
+    return [];
+  }, [dashboardData]);
+
+  // Compute stats safely with fallback logic
+  const metrics = useMemo(() => {
+    const todayAppointments = dashboardData?.stats?.todayAppointments ?? scans.length;
+    const pendingRequests = dashboardData?.stats?.pendingRequests ??
+      requests.filter(r => (r.status || '').toLowerCase() === 'pending').length;
+    const reportsReady = dashboardData?.stats?.reportsReady ??
+      scans.filter(s => s.reportStatus === 'completed' || s.hasReport || s.status === 'completed').length;
+    const statNotifications = dashboardData?.stats?.statNotifications ??
+      requests.filter(r => (r.priority || '').toLowerCase() === 'stat' || (r.priority || '').toLowerCase() === 'urgent').length;
+
+    return { todayAppointments, pendingRequests, reportsReady, statNotifications };
+  }, [dashboardData, scans, requests]);
+
+  function getPatientName(item) {
+    return (
+      item.patientName ||
+      item.patient_name ||
+      item.fullName ||
+      item.full_name ||
+      item.PatientName ||
+      `Patient #${item.patientId || item.patient_id || '—'}`
+    );
+  }
+
+  const filteredScans = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return scans;
+    return scans.filter((s) => {
+      const name = getPatientName(s);
+      const id = s.patientId || s.patient_id || s.id || '';
+      const modality = s.modality || '';
+      return [name, id, modality].some((val) => String(val).toLowerCase().includes(query));
+    });
+  }, [scans, search]);
 
   return (
-    <section className="page">
-      {loading ? <p>Loading dashboard...</p> : null}
-      {error ? <p className="error">Error: {error}</p> : null}
-      <div className="page-header">
-        <div className="welcome-banner">
-          <h1>Welcome, {name}</h1>
-          <h2>Attending Physician - Department of Orthopedics</h2>
-        </div>
-        <nav className="quick-nav">
-          <a href="/practitioner/scans" className="quick-link">Patient Records</a>
-        </nav>
+    <div className="page-container" style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto', minHeight: '100vh', background: 'var(--bg-primary, #f8fafc)', color: 'var(--text-primary, #0f172a)' }}>
+
+      {/* HEADER TITLE */}
+      <div style={{ marginBottom: '1.75rem' }}>
+        <h1 style={{ fontSize: '1.85rem', fontWeight: 700, margin: 0, color: 'var(--text-primary, #0f172a)' }}>
+          Welcome, Practitioner
+        </h1>
+        <p style={{ color: 'var(--text-secondary, #64748b)', margin: '0.25rem 0 0 0', fontSize: '1rem' }}>
+          Attending Physician — Department of Orthopedics
+        </p>
       </div>
 
-      <div className="metric-cards">
-        <div className="metric-card">
-          <div className="metric-icon"><DashboardIcon size={24} /></div>
-          <div className="metric-info">
-            <div className="metric-title">Today's Appointments</div>
-            <div className="metric-count">{appointmentsToday.length}</div>
+      {loading && !dashboardData && scans.length === 0 ? (
+        <LoadingState message="Loading practitioner dashboard..." />
+      ) : null}
+
+      {/* FIXED 4-COLUMN METRIC STRIP (THEME REACTIVE) */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+        gap: '1.25rem',
+        marginBottom: '2.25rem'
+      }}>
+        {/* CARD 1 */}
+        <div
+          onClick={() => navigate('/practitioner/scans')}
+          style={{
+            background: 'var(--bg-card, #ffffff)',
+            border: '1px solid var(--border-color, #e2e8f0)',
+            borderRadius: '12px',
+            padding: '1.25rem 1.5rem',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.03)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary, #64748b)' }}>Today's Appointments</span>
+            <span style={{ fontSize: '1.2rem' }}>📅</span>
           </div>
+          <strong style={{ fontSize: '2rem', fontWeight: 700, color: 'var(--text-primary, #0f172a)' }}>
+            {metrics.todayAppointments}
+          </strong>
         </div>
-        <div className="metric-card">
-          <div className="metric-icon"><CalendarIcon size={24} /></div>
-          <div className="metric-info">
-            <div className="metric-title">Pending Requests</div>
-            <div className="metric-count">{pendingRequests.length}</div>
+
+        {/* CARD 2 */}
+        <div
+          onClick={() => navigate('/practitioner/requests')}
+          style={{
+            background: 'var(--bg-card, #ffffff)',
+            border: '1px solid var(--border-color, #e2e8f0)',
+            borderRadius: '12px',
+            padding: '1.25rem 1.5rem',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.03)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary, #64748b)' }}>Pending Requests</span>
+            <span style={{ fontSize: '1.2rem' }}>📋</span>
           </div>
+          <strong style={{ fontSize: '2rem', fontWeight: 700, color: '#d97706' }}>
+            {metrics.pendingRequests}
+          </strong>
         </div>
-        <div className="metric-card">
-          <div className="metric-icon"><AlertIcon size={24} /></div>
-          <div className="metric-info">
-            <div className="metric-title">Reports Ready to View</div>
-            <div className="metric-count">{reportsReady.length}</div>
+
+        {/* CARD 3 */}
+        <div
+          onClick={() => navigate('/practitioner/scans')}
+          style={{
+            background: 'var(--bg-card, #ffffff)',
+            border: '1px solid var(--border-color, #e2e8f0)',
+            borderRadius: '12px',
+            padding: '1.25rem 1.5rem',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.03)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary, #64748b)' }}>Reports Ready to View</span>
+            <span style={{ fontSize: '1.2rem' }}>✅</span>
           </div>
+          <strong style={{ fontSize: '2rem', fontWeight: 700, color: '#059669' }}>
+            {metrics.reportsReady}
+          </strong>
         </div>
-        <div className="metric-card">
-          <div className="metric-icon"><CheckIcon size={24} /></div>
-          <div className="metric-info">
-            <div className="metric-title">STAT Notifications</div>
-            <div className="metric-count">{statNotifications.length}</div>
+
+        {/* CARD 4 */}
+        <div
+          onClick={() => navigate('/practitioner/requests')}
+          style={{
+            background: 'var(--bg-card, #ffffff)',
+            border: '1px solid var(--border-color, #e2e8f0)',
+            borderRadius: '12px',
+            padding: '1.25rem 1.5rem',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.03)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary, #64748b)' }}>STAT Notifications</span>
+            <span style={{ fontSize: '1.2rem' }}>⚠️</span>
           </div>
+          <strong style={{ fontSize: '2rem', fontWeight: 700, color: '#dc2626' }}>
+            {metrics.statNotifications}
+          </strong>
         </div>
       </div>
 
-      <div className="dashboard-grid">
-        <div className="grid-left">
-          <h3>Scheduled Imaging Examinations</h3>
-          {appointmentsToday.length > 0 ? (
-            <ul>
-              {appointmentsToday.map((appt) => (
-                <li key={appt.id}>
-                  <span>{appt.time} Â· {appt.patientName}</span>
-                  <span className="badge">{appt.status}</span>
-                  <button>View Scan</button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>No scheduled examinations</p>
-          )}
+      {/* SCHEDULED EXAMINATIONS PANEL */}
+      <div style={{
+        background: 'var(--bg-card, #ffffff)',
+        border: '1px solid var(--border-color, #e2e8f0)',
+        borderRadius: '12px',
+        padding: '1.5rem',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.03)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+          <h2 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-primary, #0f172a)' }}>
+            Scheduled Imaging Examinations
+          </h2>
+
+          <div style={{ display: 'flex', gap: '0.75rem', flex: '1', maxWidth: '380px' }}>
+            <div style={{ position: 'relative', width: '100%' }}>
+              <SearchIcon size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary, #64748b)' }} />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search patient, ID or modality..."
+                style={{
+                  width: '100%',
+                  padding: '8px 12px 8px 36px',
+                  borderRadius: '8px',
+                  border: '1px solid var(--border-color, #cbd5e1)',
+                  background: 'var(--bg-input, #f8fafc)',
+                  color: 'var(--text-primary, #0f172a)',
+                  fontSize: '0.875rem',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+          </div>
         </div>
-        <div className="grid-right">
-          <h3>Recent Activity Feed</h3>
-          {statNotifications.length > 0 ? (
-            <ul>
-              {statNotifications.map((notif) => (
-                <li key={notif.id} className="stat-alert">
-                  <span className="badge stat-badge">STAT</span>
-                  {notif.message}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>No STAT alerts</p>
-          )}
-          {reportsReady.length > 0 ? (
-            <ul>
-              {reportsReady.map((report) => (
-                <li key={report.id}>
-                  <span>{report.mrn} Â· {report.studyType}</span>
-                  <button>View Report</button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>No reports ready</p>
-          )}
-        </div>
+
+        {filteredScans.length > 0 ? (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.875rem' }}>
+              <thead>
+                <tr style={{ borderBottom: '2px solid var(--border-color, #e2e8f0)', color: 'var(--text-secondary, #64748b)' }}>
+                  <th style={{ padding: '0.75rem 1rem' }}>Patient ID</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>Patient Name</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>Modality</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>Description</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>Status</th>
+                  <th style={{ padding: '0.75rem 1rem' }}>Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredScans.map((scan, idx) => {
+                  const pId = scan.patientId || scan.patient_id || scan.PatientID || `PAT-${idx + 1}`;
+                  const pName = getPatientName(scan);
+                  const modality = scan.modality || scan.Modality || '—';
+                  const description = scan.studyDescription || scan.description || scan.StudyDescription || '—';
+                  const status = scan.status || scan.reportStatus || 'Scheduled';
+                  const date = scan.studyDate || scan.createdAt || scan.created_at;
+
+                  return (
+                    <tr key={scan.id || idx} style={{ borderBottom: '1px solid var(--border-color, #f1f5f9)' }}>
+                      <td style={{ padding: '0.85rem 1rem', fontFamily: 'monospace', fontWeight: 600, color: 'var(--text-primary, #0f172a)' }}>{formatValue(pId, '—')}</td>
+                      <td style={{ padding: '0.85rem 1rem', fontWeight: 600, color: 'var(--text-primary, #0f172a)' }}>{pName}</td>
+                      <td style={{ padding: '0.85rem 1rem' }}>
+                        <span style={{
+                          padding: '3px 8px',
+                          borderRadius: '6px',
+                          background: 'rgba(13, 148, 136, 0.15)',
+                          color: '#0d9488',
+                          fontWeight: 700,
+                          fontSize: '0.75rem'
+                        }}>
+                          {modality}
+                        </span>
+                      </td>
+                      <td style={{ padding: '0.85rem 1rem', color: 'var(--text-secondary, #475569)' }}>{description}</td>
+                      <td style={{ padding: '0.85rem 1rem' }}><StatusBadge status={status} /></td>
+                      <td style={{ padding: '0.85rem 1rem', color: 'var(--text-secondary, #64748b)' }}>{date ? formatDateTime(date) : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{ padding: '2rem 0' }}>
+            <EmptyState title="No scheduled examinations" message="No imaging appointments or scans match your query." />
+          </div>
+        )}
       </div>
-    </section>
+
+    </div>
   );
 }

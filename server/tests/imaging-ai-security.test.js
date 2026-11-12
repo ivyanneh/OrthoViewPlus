@@ -1419,7 +1419,7 @@ test('AI creation checks exact study assignment and derives patient identity fro
       db: fixture.db,
       studies: fixture.studies,
       aiJobs,
-      aiClient: { capabilities: {}, async health() {} },
+      aiClient: { capabilities: { restore: {}, compare: {} }, async health() {} },
       orthanc,
       patientMappings: fixture.mappings,
       resultsDirectory: fixture.directory,
@@ -1537,7 +1537,7 @@ test('AI job and result routes do not substitute requester ownership for exact s
           throw new Error('Retry must not be reached');
         },
       },
-      aiClient: { capabilities: {} },
+      aiClient: { capabilities: { restore: {}, compare: {}, synthetic: {} } },
       orthanc: createMockOrthanc(),
       patientMappings: fixture.mappings,
       resultsDirectory: fixture.directory,

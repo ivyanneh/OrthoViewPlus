@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import api from '../api/client.js';
 import DicomViewer from '../components/DicomViewer.jsx';
@@ -10,6 +11,7 @@ import { getApiError } from '../utils/format.js';
 
 export default function ScansImaging() {
   const { user } = useAuth();
+  const location = useLocation();
   const isRadiologist = user?.role === 'radiologist';
   const [searchQuery, setSearchQuery] = useState('');
   const [searchType, setSearchType] = useState('patientId');
@@ -23,6 +25,52 @@ export default function ScansImaging() {
   const [error, setError] = useState('');
   const [assignedRequests, setAssignedRequests] = useState([]);
   const [selectedRequest, setSelectedRequest] = useState(null);
+
+  // Handle pre-selected study from navigation state (from ImagingRequests)
+  useEffect(() => {
+    const state = location.state;
+    if (state?.preSelectedPatientId && state?.preSelectedStudyId) {
+      loadPreSelectedStudy(state);
+    }
+  }, [location.state]);
+
+  async function loadPreSelectedStudy(state) {
+    setError('');
+    setLoading(true);
+    try {
+      // Load patient history using the imaging request ID
+      const historyResponse = await api.get(`/clinical/patients/${state.preSelectedPatientId}`, {
+        params: { requestId: state.preSelectedRequestId }
+      });
+      const patient = historyResponse.data.patient;
+      const studies = historyResponse.data?.history?.studies || [];
+
+      setSelectedPatient({
+        ...patient,
+        first_name: patient.first_name ?? patient.firstName,
+        last_name: patient.last_name ?? patient.lastName,
+        date_of_birth: patient.date_of_birth ?? patient.dateOfBirth,
+      });
+      setPatientHistory(historyResponse.data);
+
+      // Find the pre-selected study
+      const study = studies.find(s => s.id === state.preSelectedStudyId);
+      if (study) {
+        setSelectedStudy(study);
+
+        // Load study profile from Orthanc
+        const orthancStudyId = study.orthanc_study_id || study.orthancStudyId;
+        if (orthancStudyId) {
+          const profileResponse = await api.get(`/imaging/studies/${encodeURIComponent(orthancStudyId)}`);
+          setStudyProfile(profileResponse.data);
+        }
+      }
+    } catch (err) {
+      setError(getApiError(err, 'Unable to load the pre-selected study.'));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (!isRadiologist) return undefined;
@@ -59,7 +107,7 @@ export default function ScansImaging() {
 
   async function handleSearch() {
     if (!searchQuery.trim()) return;
-    
+
     setError('');
     setLoading(true);
     try {
@@ -82,7 +130,7 @@ export default function ScansImaging() {
     setSelectedStudy(null);
     setStudyProfile(null);
     setError('');
-    
+
     try {
       const historyResponse = await api.get(`/clinical/patients/${patient.id}`);
       setPatientHistory(historyResponse.data);
@@ -92,7 +140,7 @@ export default function ScansImaging() {
   }
 
   async function selectAssignedRequest(request) {
-    if (Number(request.assignedRadiologistId) !== Number(user?.id)) {
+    if (Number(request.assigned_radiologist_id) !== Number(user?.id) && Number(request.assignedRadiologistId) !== Number(user?.id)) {
       setError('This request is not assigned to your account.');
       return;
     }
@@ -106,7 +154,7 @@ export default function ScansImaging() {
 
     try {
       const response = await api.get(
-        `/clinical/patients/${request.patientId}`,
+        `/clinical/patients/${request.patient_id || request.patientId}`,
         { params: { requestId: request.id } },
       );
 
@@ -118,6 +166,21 @@ export default function ScansImaging() {
         last_name: historyPatient.last_name ?? historyPatient.lastName,
         date_of_birth: historyPatient.date_of_birth ?? historyPatient.dateOfBirth,
       });
+
+      // Auto-load the linked study if it exists
+      const studies = response.data?.history?.studies || [];
+      const linkedStudy = studies.find(
+        s => s.imaging_request_id === request.id || s.imagingRequestId === request.id
+      );
+
+      if (linkedStudy) {
+        setSelectedStudy(linkedStudy);
+        const orthancStudyId = linkedStudy.orthanc_study_id || linkedStudy.orthancStudyId;
+        if (orthancStudyId) {
+          const profileResponse = await api.get(`/imaging/studies/${encodeURIComponent(orthancStudyId)}`);
+          setStudyProfile(profileResponse.data);
+        }
+      }
     } catch (err) {
       setSelectedRequest(null);
       setSelectedPatient(null);
@@ -131,9 +194,14 @@ export default function ScansImaging() {
     setSelectedStudy(study);
     setError('');
     setLoading(true);
-    
+
     try {
-      const response = await api.get(`/imaging/studies/${encodeURIComponent(study.orthancStudyId)}`);
+      const orthancStudyId = study.orthanc_study_id || study.orthancStudyId;
+      if (!orthancStudyId) {
+        setError('This study does not have an Orthanc study ID.');
+        return;
+      }
+      const response = await api.get(`/imaging/studies/${encodeURIComponent(orthancStudyId)}`);
       setStudyProfile(response.data);
     } catch (err) {
       setError(getApiError(err, 'Unable to load study details.'));
@@ -296,7 +364,7 @@ export default function ScansImaging() {
 
   if (!selectedStudy) {
     const studies = patientHistory?.history?.studies || [];
-    
+
     return (
       <section className="page">
         <div className="panel">
@@ -333,7 +401,7 @@ export default function ScansImaging() {
                       <td>{study.study_date || 'N/A'}</td>
                       <td>{study.modality || 'N/A'}</td>
                       <td>{study.description || 'N/A'}</td>
-                      <td>{study.source || 'original'}</td>
+                      <td>{study.source || study.type || 'original'}</td>
                       <td>
                         <button
                           type="button"
@@ -461,10 +529,10 @@ export default function ScansImaging() {
                 <dd>{patientHistory.patient?.date_of_birth || 'N/A'}</dd>
               </div>
             </div>
-            
+
             <h4 style={{ marginTop: '1.5rem' }}>Medical History</h4>
             <p>{patientHistory.patient?.notes || 'No medical history available.'}</p>
-            
+
             <h4 style={{ marginTop: '1.5rem' }}>Previous Imaging Examinations</h4>
             {patientHistory.history?.studies?.length > 0 ? (
               <table className="data-table compact-table">

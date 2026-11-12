@@ -117,7 +117,7 @@ export default function Login() {
                   required
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="e.g. practitioner_dr"
+                  placeholder=""
                   style={{
                     width: '100%',
                     padding: '10px 14px',
@@ -125,7 +125,7 @@ export default function Login() {
                     border: '1px solid #cbd5e1',
                     fontSize: '0.95rem',
                     color: '#0f172a',
-                    background: '#f8fafc',
+                    background: '#ffffff',
                     outline: 'none',
                     boxSizing: 'border-box'
                   }}
@@ -142,7 +142,7 @@ export default function Login() {
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder=""
                   style={{
                     width: '100%',
                     padding: '10px 14px',
@@ -150,7 +150,7 @@ export default function Login() {
                     border: '1px solid #cbd5e1',
                     fontSize: '0.95rem',
                     color: '#0f172a',
-                    background: '#f8fafc',
+                    background: '#ffffff',
                     outline: 'none',
                     boxSizing: 'border-box'
                   }}

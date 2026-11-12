@@ -70,6 +70,8 @@ const adminSections = [
       { to: '/admin/dashboard', label: 'Dashboard', Icon: DashboardIcon },
       { to: '/admin/users', label: 'User Management', Icon: UsersIcon },
       { to: '/admin/patients-imaging', label: 'Patient Records', Icon: ImageIcon },
+      { to: '/admin/patient-mapping', label: 'Patient Mapping', Icon: ImageIcon },
+      { to: '/admin/study-linking', label: 'Study Linking', Icon: ImageIcon },
       { to: '/admin/scheduling', label: 'Scheduling', Icon: CalendarIcon },
       { to: '/admin/audit-logs', label: 'Audit & System Logs', Icon: AuditIcon },
       { to: '/admin/settings', label: 'My Profile & Settings', Icon: SettingsIcon },
