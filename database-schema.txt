@@ -1,0 +1,252 @@
+﻿DATABASE SCHEMA
+================
+
+ai_jobs
+CREATE TABLE ai_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      capability TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+      requested_by INTEGER NOT NULL,
+      patient_id INTEGER,
+      source_study_id INTEGER,
+      orthanc_instance_id TEXT,
+      input_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT, retry_count INTEGER NOT NULL DEFAULT 0, last_retry_at TEXT,
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (source_study_id) REFERENCES imaging_studies(id)
+    )
+
+ai_results
+CREATE TABLE ai_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      capability TEXT NOT NULL,
+      source_study_id INTEGER,
+      result_kind TEXT NOT NULL,
+      file_path TEXT,
+      overlay_path TEXT,
+      metadata_json TEXT,
+      label TEXT NOT NULL,
+      review_status TEXT NOT NULL DEFAULT 'pending_review'
+        CHECK (review_status IN ('pending_review', 'reviewed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (job_id) REFERENCES ai_jobs(id),
+      FOREIGN KEY (source_study_id) REFERENCES imaging_studies(id)
+    )
+
+alerts
+CREATE TABLE alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      description TEXT NOT NULL,
+      resource TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      reviewed_by INTEGER,
+      reviewed_at TEXT,
+      FOREIGN KEY (reviewed_by) REFERENCES users(id)
+    )
+
+appointments
+CREATE TABLE appointments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL,
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      examination TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      assigned_user_id INTEGER,
+      requested_by INTEGER,
+      status TEXT NOT NULL DEFAULT 'scheduled'
+        CHECK (status IN ('scheduled', 'completed', 'cancelled', 'missed')),
+      notes TEXT,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      completed_at TEXT,
+      missed_at TEXT,
+      grace_alert_sent INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (assigned_user_id) REFERENCES users(id),
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+
+audit_logs
+CREATE TABLE audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      target TEXT,
+      description TEXT,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+
+imaging_requests
+CREATE TABLE imaging_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL,
+      appointment_id INTEGER,
+      requested_by INTEGER NOT NULL,
+      assigned_radiologist_id INTEGER,
+      examination TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'routine' CHECK (priority IN ('routine', 'urgent')),
+      clinical_indication TEXT,
+      status TEXT NOT NULL DEFAULT 'submitted'
+        CHECK (status IN ('submitted', 'scheduled', 'in_progress', 'completed', 'cancelled')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id),
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (assigned_radiologist_id) REFERENCES users(id)
+    )
+
+imaging_schedule
+CREATE TABLE imaging_schedule (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      examination TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      reference TEXT,
+      assigned_user_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      notes TEXT,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (assigned_user_id) REFERENCES users(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+
+imaging_studies
+CREATE TABLE imaging_studies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER,
+      appointment_id INTEGER,
+      imaging_request_id INTEGER,
+      orthanc_study_id TEXT,
+      study_instance_uid TEXT,
+      study_date TEXT,
+      modality TEXT,
+      description TEXT,
+      source TEXT NOT NULL DEFAULT 'original'
+        CHECK (source IN ('original', 'ai_derived', 'synthetic')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id),
+      FOREIGN KEY (imaging_request_id) REFERENCES imaging_requests(id)
+    )
+
+notifications
+CREATE TABLE notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      resource_type TEXT,
+      resource_id TEXT,
+      read_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+
+patient_dicom_mappings
+CREATE TABLE patient_dicom_mappings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patient_id INTEGER NOT NULL,
+        orthanc_patient_id TEXT NOT NULL,
+        patient_name TEXT,
+        patient_birth_date TEXT,
+        verified_at TEXT NOT NULL DEFAULT (datetime('now')),
+        verified_by INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('verified', 'rejected', 'pending')),
+        notes TEXT,
+        FOREIGN KEY (patient_id) REFERENCES patients(id),
+        FOREIGN KEY (verified_by) REFERENCES users(id),
+        UNIQUE(patient_id, orthanc_patient_id)
+      )
+
+patients
+CREATE TABLE patients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mrn TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      first_name TEXT NOT NULL,
+      last_name TEXT NOT NULL,
+      date_of_birth TEXT,
+      sex TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+
+radiology_reports
+CREATE TABLE radiology_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      imaging_study_id INTEGER,
+      patient_id INTEGER NOT NULL,
+      imaging_request_id INTEGER,
+      radiologist_id INTEGER NOT NULL,
+      findings TEXT,
+      impression TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      approved_at TEXT,
+      FOREIGN KEY (imaging_study_id) REFERENCES imaging_studies(id),
+      FOREIGN KEY (patient_id) REFERENCES patients(id),
+      FOREIGN KEY (imaging_request_id) REFERENCES imaging_requests(id),
+      FOREIGN KEY (radiologist_id) REFERENCES users(id)
+    )
+
+users
+CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'practitioner',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    , full_name TEXT, email TEXT, department TEXT, status TEXT NOT NULL DEFAULT 'active', restricted INTEGER NOT NULL DEFAULT 0, restriction_reason TEXT, updated_at TEXT, last_login_at TEXT, token_version INTEGER NOT NULL DEFAULT 0, phone TEXT, theme_preference TEXT DEFAULT 'light', notification_preference INTEGER NOT NULL DEFAULT 1, professional_title TEXT, specialisation TEXT, facility TEXT, registration_number TEXT)
+
+FOREIGN KEY RELATIONSHIPS
+========================
+audit_logs -> (0, 0, 'users', 'user_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_schedule -> (0, 0, 'users', 'created_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_schedule -> (1, 0, 'users', 'assigned_user_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+alerts -> (0, 0, 'users', 'reviewed_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+patient_dicom_mappings -> (0, 0, 'users', 'verified_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+patient_dicom_mappings -> (1, 0, 'patients', 'patient_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+patients -> (0, 0, 'users', 'created_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+appointments -> (0, 0, 'users', 'created_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+appointments -> (1, 0, 'users', 'requested_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+appointments -> (2, 0, 'users', 'assigned_user_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+appointments -> (3, 0, 'patients', 'patient_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_requests -> (0, 0, 'users', 'assigned_radiologist_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_requests -> (1, 0, 'users', 'requested_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_requests -> (2, 0, 'appointments', 'appointment_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_requests -> (3, 0, 'patients', 'patient_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_studies -> (0, 0, 'imaging_requests', 'imaging_request_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_studies -> (1, 0, 'appointments', 'appointment_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+imaging_studies -> (2, 0, 'patients', 'patient_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+radiology_reports -> (0, 0, 'users', 'radiologist_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+radiology_reports -> (1, 0, 'imaging_requests', 'imaging_request_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+radiology_reports -> (2, 0, 'patients', 'patient_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+radiology_reports -> (3, 0, 'imaging_studies', 'imaging_study_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+notifications -> (0, 0, 'users', 'user_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+ai_jobs -> (0, 0, 'imaging_studies', 'source_study_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+ai_jobs -> (1, 0, 'patients', 'patient_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+ai_jobs -> (2, 0, 'users', 'requested_by', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+ai_results -> (0, 0, 'imaging_studies', 'source_study_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
+ai_results -> (1, 0, 'ai_jobs', 'job_id', 'id', 'NO ACTION', 'NO ACTION', 'NONE')
